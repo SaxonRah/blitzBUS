@@ -26,6 +26,36 @@
 #define BB_HAVE_TIMER 1
 #endif
 
+/* microsecond clock, also used by blitz86 for translate time (-DB86_NOW=bb_now_us) */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#include "hardware/structs/xip_ctrl.h"
+uint64_t bb_now_us(void) { return time_us_64(); }
+/* XIP/QMI cache misses (flash + PSRAM), free-running 32-bit counters */
+static uint32_t xip_miss32(void) { return xip_ctrl_hw->ctr_acc - xip_ctrl_hw->ctr_hit; }
+static uint64_t xip_acc_miss;
+static uint32_t xip_last;
+uint64_t bb_xip_misses(void)
+{
+    uint32_t m = xip_miss32();
+    xip_acc_miss += (uint32_t)(m - xip_last);
+    xip_last = m;
+    return xip_acc_miss;
+}
+#else
+#include <time.h>
+uint64_t bb_xip_misses(void) { return 0; }
+uint64_t bb_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+#endif
+
+#ifndef BB_TR_PAGES
+#define BB_TR_PAGES 64u            /* byte-exact pages (512 B bitmap each, SRAM) */
+#endif
+
 #ifndef BB_CODE_BYTES
 #define BB_CODE_BYTES (128u * 1024u)
 #endif
@@ -84,13 +114,22 @@ static uint16_t bios_seg;
 static int enabled = 1, failed = 0;
 static uint32_t gen_seen[MD_X86_CODE_PAGE_COUNT];
 static BbLiveStats st;
+/* byte-exact write filtering inside microDOS: pages holding translated
+   bytes get MD_X86_PAGE_TRBYTES and a bitmap of the covered bytes, so a
+   microDOS store bumps the page generation only if it hits translated code */
+static uint8_t *trbits[MD_X86_CODE_PAGE_COUNT];
+static uint8_t trpool[BB_TR_PAGES][MD_X86_CODE_PAGE_SIZE / 8u] __attribute__((aligned(4)));
+static unsigned trpool_used;
+static uint8_t want_flags[MD_X86_CODE_PAGE_COUNT];
+static uint8_t tracked[MD_X86_CODE_PAGE_COUNT];     /* pages with any flag, in order */
+static unsigned ntracked;
 static int last_rc = -1;
 #if BB_HAVE_TIMER
 static struct repeating_timer slice_timer;
 static bool slice_cb(struct repeating_timer *t) { (void)t; C.irq |= 1u; return true; }
 #endif
 
-static void to_b86(void)
+B86_HOT static void to_b86(void)
 {
     MdX86 *m = &R->cpu;
     for (unsigned i = 0; i < 8u; ++i) C.r[i] = m->r[i];
@@ -102,7 +141,7 @@ static void to_b86(void)
     b86_set_flags(&C, md_x86_flags(m));
 }
 
-static void to_md(void)
+B86_HOT static void to_md(void)
 {
     MdX86 *m = &R->cpu;
     for (unsigned i = 0; i < 8u; ++i) m->r[i] = (uint16_t)C.r[i];
@@ -114,21 +153,56 @@ static void to_md(void)
     md_x86_set_flags(m, b86_get_flags(&C));
 }
 
-/* Every page tracked: microDOS bumps code_page_generation on any write it
-   performs (hooks, BIOS-segment interpretation). Translation-side stores
-   go straight to memory and are covered by blitz86's own SMC checks. */
-static void track_all_pages(void)
+B86_HOT static void code_hook(B86Cpu *c, uint32_t lin, uint32_t len)
 {
+    (void)c;
 #if MICRODOS_TRANSLATION_SUPPORT
-    for (unsigned p = 0; p < MD_X86_CODE_PAGE_COUNT; ++p)
-        R->code_page_executable[p] |= MD_X86_PAGE_TRANSLATED;
+    for (uint32_t a = lin, end = lin + len; a < end; ) {
+        if (a >= MD_X86_ADDRESS_SPACE) return;        /* HMA: microDOS never writes there */
+        unsigned p = a >> MD_X86_CODE_PAGE_SHIFT;
+        uint32_t pend = ((uint32_t)p + 1u) << MD_X86_CODE_PAGE_SHIFT;
+        uint32_t stop = end < pend ? end : pend;
+        if (trbits[p] == NULL && !(want_flags[p] & MD_X86_PAGE_TRANSLATED)) {
+            if (want_flags[p] == 0) tracked[ntracked++] = (uint8_t)p;
+            if (trpool_used < BB_TR_PAGES) {
+                trbits[p] = trpool[trpool_used++];
+                memset(trbits[p], 0, MD_X86_CODE_PAGE_SIZE / 8u);
+                want_flags[p] |= MD_X86_PAGE_TRBYTES;
+            } else {
+                want_flags[p] |= MD_X86_PAGE_TRANSLATED;  /* pool full: page-level */
+            }
+            R->code_page_executable[p] |= want_flags[p];
+        }
+        if (trbits[p]) {
+            for (uint32_t b = a; b < stop; ++b) {
+                uint32_t o = b & MD_X86_CODE_PAGE_MASK;
+                trbits[p][o >> 3] |= (uint8_t)(1u << (o & 7u));
+            }
+        }
+        a = stop;
+    }
+#else
+    (void)lin; (void)len;
 #endif
 }
 
-static void sync_pages(void)
+/* re-assert our page flags (cheap) in case microDOS rewrote the table */
+B86_HOT static void track_pages(void)
 {
 #if MICRODOS_TRANSLATION_SUPPORT
-    for (unsigned p = 0; p < MD_X86_CODE_PAGE_COUNT; ++p) {
+    for (unsigned i = 0; i < ntracked; ++i) {
+        const unsigned p = tracked[i];
+        R->code_page_executable[p] |= want_flags[p];
+    }
+    R->cpu.tr_live_bits = trbits;
+#endif
+}
+
+B86_HOT static void sync_pages(void)
+{
+#if MICRODOS_TRANSLATION_SUPPORT
+    for (unsigned i = 0; i < ntracked; ++i) {
+        const unsigned p = tracked[i];
         const uint32_t g = R->code_page_generation[p];
         if (g != gen_seen[p]) {
             gen_seen[p] = g;
@@ -143,7 +217,7 @@ static void sync_pages(void)
 #endif
 }
 
-static int hook_int(B86Cpu *c, uint8_t v)
+B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
 #ifdef BB_DEBUG
     fprintf(stderr, "[bb]   int %02X at %04X:%04X\n", v, (unsigned)c->seg[B86_CS], (unsigned)c->ip);
@@ -157,12 +231,12 @@ static int hook_int(B86Cpu *c, uint8_t v)
     if (R->stop_reason != MD_STOP_NONE) c->irq |= 1u;
     return 1;
 }
-static uint8_t hook_in(B86Cpu *c, uint16_t port)
+B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     (void)c;
     return R->hooks.in8 ? R->hooks.in8(R, port, R->hooks.user) : 0xFFu;
 }
-static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
+B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 {
     (void)c;
     if (R->hooks.out8) R->hooks.out8(R, port, v, R->hooks.user);
@@ -176,6 +250,7 @@ static int start(MdRuntime *rt)
     bios_seg = ((const MdMsdos2Boot *)rt->hooks.user)->bios_segment;
     b86_init(&C, rt->cpu.memory);      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
     C.int_hook = hook_int;
+    C.code_hook = code_hook;
     C.in8 = hook_in;
     C.out8 = hook_out;
 #if defined(__linux__)
@@ -201,15 +276,18 @@ static int start(MdRuntime *rt)
 
 void bb_live_set_enabled(int on) { enabled = on; }
 
-int bb_live_try(MdRuntime *rt, uint64_t left)
+B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
     if (!enabled || failed || rt->stop_reason != MD_STOP_NONE) return 0;
     if (R == NULL && !start(rt)) return 0;
     if (rt != R || rt->cpu.cs == bios_seg) return 0;
 
-    track_all_pages();
+    uint64_t t0 = bb_now_us();
+    track_pages();
     sync_pages();                       /* writes made while microDOS ran */
+    uint64_t t1 = bb_now_us();
+    st.sync_us += t1 - t0;
     to_b86();
     C.trap_cs = bios_seg;
     C.irq = 0;
@@ -217,7 +295,10 @@ int bb_live_try(MdRuntime *rt, uint64_t left)
 #ifdef BB_DEBUG
     fprintf(stderr, "[bb] slice %llu enter %04X:%04X\n", (unsigned long long)st.slices, rt->cpu.cs, rt->cpu.ip);
 #endif
+    uint64_t m1 = bb_xip_misses();
     int rc = b86_jit_run(&C, BB_SLICE_DISPATCH);
+    st.native_us += bb_now_us() - t1;
+    st.native_misses += bb_xip_misses() - m1;
     last_rc = rc;
     to_md();
 #ifdef BB_DEBUG
@@ -232,7 +313,22 @@ int bb_live_try(MdRuntime *rt, uint64_t left)
     return C.icnt != 0 || rc == B86_HALT || rt->stop_reason != MD_STOP_NONE;
 }
 
-void bb_live_get_stats(BbLiveStats *s) { *s = st; }
+void bb_live_get_stats(BbLiveStats *s)
+{
+    *s = st;
+    if (J) {
+        const B86JitStats *js = b86_jit_stats(J);
+        s->translate_us = js->translate_us;
+        s->flushes = js->flushes;
+        s->fast_dispatches = js->fast_dispatches;
+        s->dispatches = js->dispatches;
+        s->translate_misses = js->translate_misses;
+        s->rt_step = js->rt_step; s->rt_cond = js->rt_cond; s->rt_flags = js->rt_flags;
+        s->rt_light = js->rt_light; s->rt_smc = js->rt_smc; s->rt_rep = js->rt_rep;
+        s->blocks = js->blocks;
+    }
+    s->tr_pages = trpool_used;
+}
 
 /* ---- compatibility accessors ---------------------------------------------- */
 uint64_t bb_live_retired(void) { return st.retired; }
@@ -260,3 +356,26 @@ void bb_live_status(int *rc, uint64_t *delta, uint16_t *expected_ip, uint16_t *a
 }
 
 struct B86Jit *bb_live_jit(void) { return J; }
+
+/* Telemetry for the Ctrl+] block: cumulative timing plus a delta line since
+   the previous call (per-phase profiles). */
+void bb_live_print_extra(void (*say)(const char *fmt, ...))
+{
+    static BbLiveStats prev;
+    BbLiveStats s;
+    bb_live_get_stats(&s);
+    say("[bb-live-time] native=%llu ms (translate=%llu ms) sync=%llu ms flushes=%llu dispatches=%llu fast=%llu native-misses=%llu translate-misses=%llu\n",
+        (unsigned long long)(s.native_us / 1000u), (unsigned long long)(s.translate_us / 1000u),
+        (unsigned long long)(s.sync_us / 1000u), (unsigned long long)s.flushes,
+        (unsigned long long)s.dispatches, (unsigned long long)s.fast_dispatches,
+        (unsigned long long)s.native_misses, (unsigned long long)s.translate_misses);
+    say("[bb-live-delta] retired=%llu native=%llu ms translate=%llu ms blocks=%llu native-misses=%llu translate-misses=%llu "
+        "rt-step=%llu rt-cond=%llu rt-flags=%llu rt-light=%llu rt-smc=%llu traps=%llu\n",
+        (unsigned long long)(s.retired - prev.retired), (unsigned long long)((s.native_us - prev.native_us) / 1000u),
+        (unsigned long long)((s.translate_us - prev.translate_us) / 1000u), (unsigned long long)(s.blocks - prev.blocks),
+        (unsigned long long)(s.native_misses - prev.native_misses), (unsigned long long)(s.translate_misses - prev.translate_misses),
+        (unsigned long long)(s.rt_step - prev.rt_step), (unsigned long long)(s.rt_cond - prev.rt_cond),
+        (unsigned long long)(s.rt_flags - prev.rt_flags), (unsigned long long)(s.rt_light - prev.rt_light),
+        (unsigned long long)(s.rt_smc - prev.rt_smc), (unsigned long long)(s.traps - prev.traps));
+    prev = s;
+}

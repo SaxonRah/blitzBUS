@@ -47,16 +47,17 @@ def main():
                 (unsigned long long)bb_live_retired(),
                 (unsigned long long)bb_live_blocks(),bb_live_ready());
             { BbLiveStats bs; bb_live_get_stats(&bs);
-              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu halts=%llu fail=%s\n",
+              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu tr-pages=%llu halts=%llu fail=%s\n",
                 (unsigned long long)bs.slices,(unsigned long long)bs.traps,(unsigned long long)bs.hook_calls,
                 (unsigned long long)bs.page_syncs,(unsigned long long)bs.page_invalidations,
-                (unsigned long long)bs.halts,bb_live_fail_reason()); }
+                (unsigned long long)bs.tr_pages,(unsigned long long)bs.halts,bb_live_fail_reason());
+              bb_live_print_extra(md_say); }
             { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
               bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
               md_say("[bb-jit] last-rc=%d chains=%llu smc-inval=%llu helpers=%llu\n",
                 rc,(unsigned long long)b,(unsigned long long)e,(unsigned long long)o); }'''
     pico_text = pico_text.replace('g_con.stats_requested=false;md_stats(start_us);', stats_block, 1)
-    if pico_text.count('[bb-live-owner]') != 1 or pico_text.count('[bb-jit]') != 1:
+    if pico_text.count('[bb-live-owner]') != 1 or pico_text.count('[bb-jit]') != 1 or pico_text.count('bb_live_print_extra(md_say)') != 1:
         raise SystemExit('Live stats insertion failed')
     # Guard against the escaped-newline regression before emitting generated C.
     if r';\n            md_say' in pico_text:
@@ -92,7 +93,8 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
     BB_CODE_BYTES=196608u BB_HOT_BYTES=32768u
-    B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free
+    B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
+    B86_RAM_FUNCS=1
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
     BLITZBUS_LCD_CONSOLE=1

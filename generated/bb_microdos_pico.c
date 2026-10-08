@@ -1059,10 +1059,11 @@ int main(void)
                 (unsigned long long)bb_live_retired(),
                 (unsigned long long)bb_live_blocks(),bb_live_ready());
             { BbLiveStats bs; bb_live_get_stats(&bs);
-              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu halts=%llu fail=%s\n",
+              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu tr-pages=%llu halts=%llu fail=%s\n",
                 (unsigned long long)bs.slices,(unsigned long long)bs.traps,(unsigned long long)bs.hook_calls,
                 (unsigned long long)bs.page_syncs,(unsigned long long)bs.page_invalidations,
-                (unsigned long long)bs.halts,bb_live_fail_reason()); }
+                (unsigned long long)bs.tr_pages,(unsigned long long)bs.halts,bb_live_fail_reason());
+              bb_live_print_extra(md_say); }
             { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
               bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
               md_say("[bb-jit] last-rc=%d chains=%llu smc-inval=%llu helpers=%llu\n",

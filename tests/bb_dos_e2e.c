@@ -163,12 +163,33 @@ int main(int argc, char **argv)
         struct B86Jit *jj = bb_live_jit();
         if (jj) {
             const B86JitStats *js = b86_jit_stats(jj);
+            printf("[e2e] C round trips: step=%llu cond=%llu flags=%llu light=%llu smc=%llu rep=%llu  lookups-missed=%llu\n",
+                   (unsigned long long)js->rt_step, (unsigned long long)js->rt_cond, (unsigned long long)js->rt_flags,
+                   (unsigned long long)js->rt_light, (unsigned long long)js->rt_smc, (unsigned long long)js->rt_rep,
+                   (unsigned long long)(js->dispatches - js->fast_dispatches));
             printf("[e2e] jit blocks=%llu flushes=%llu smc-hits=%llu smc-inval=%llu chains=%llu dispatches=%llu helpers=%llu bytes/insn=%.1f\n",
                    (unsigned long long)js->blocks, (unsigned long long)js->flushes, (unsigned long long)js->smc_hits,
                    (unsigned long long)js->smc_invalidations, (unsigned long long)js->chains, (unsigned long long)js->dispatches,
                    (unsigned long long)js->helper_insns, js->guest_insns ? (double)js->host_bytes / (double)js->guest_insns : 0.0);
         }
     }
+    printf("[e2e] time native=%llums (translate %llums) sync=%llums  flushes=%llu dispatches=%llu fast=%llu tr-pages=%llu\n",
+           (unsigned long long)(s.native_us / 1000), (unsigned long long)(s.translate_us / 1000), (unsigned long long)(s.sync_us / 1000),
+           (unsigned long long)s.flushes, (unsigned long long)s.dispatches, (unsigned long long)s.fast_dispatches, (unsigned long long)s.tr_pages);
+#ifdef B86_HELPER_HISTO
+    {
+        extern uint64_t b86_helper_histo[256];
+        uint64_t tot = 0; for (int i = 0; i < 256; ++i) tot += b86_helper_histo[i];
+        printf("[e2e] helper executions %llu; top opcodes:", (unsigned long long)tot);
+        for (int n = 0; n < 16; ++n) { int bi = 0; for (int i = 1; i < 256; ++i) if (b86_helper_histo[i] > b86_helper_histo[bi]) bi = i;
+            if (!b86_helper_histo[bi]) break; printf(" %02X:%llu", bi, (unsigned long long)b86_helper_histo[bi]); b86_helper_histo[bi] = 0; }
+        printf("\n");
+        extern uint64_t b86_helper_histo2[32];
+        printf("[e2e] D0/D1 by w,reg:"); for (int i = 0; i < 16; ++i) if (b86_helper_histo2[i]) printf(" w%d/%d:%llu", i / 8, i % 8, (unsigned long long)b86_helper_histo2[i]);
+        printf("\n[e2e] F6/F7 by w,reg:"); for (int i = 16; i < 32; ++i) if (b86_helper_histo2[i]) printf(" w%d/%d:%llu", (i - 16) / 8, i % 8, (unsigned long long)b86_helper_histo2[i]);
+        printf("\n");
+    }
+#endif
     int ok = 1;
     if (!strstr(e.out, "passed: 25   failed: 0")) { printf("[e2e] FAIL: DOS2TEST\n"); ok = 0; }
     const char *ck = strstr(e.out, "checksum = ");

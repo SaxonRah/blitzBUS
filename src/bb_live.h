@@ -23,7 +23,18 @@ typedef struct BbLiveStats {
     uint64_t page_syncs;         /* pages microDOS wrote (checked)        */
     uint64_t page_invalidations; /* code lines that actually changed       */
     uint64_t halts;
+    uint64_t native_us;          /* time inside b86_jit_run (incl. translate) */
+    uint64_t translate_us;       /* of which translating (needs B86_NOW)     */
+    uint64_t sync_us;            /* checking microDOS writes                 */
+    uint64_t flushes, dispatches, fast_dispatches;
+    uint64_t tr_pages;           /* pages with byte-exact write filtering    */
+    uint64_t native_misses;      /* XIP/QMI misses inside b86_jit_run (RP2350) */
+    uint64_t translate_misses;   /* of which while translating               */
+    uint64_t rt_step, rt_cond, rt_flags, rt_light, rt_smc, rt_rep, blocks;
 } BbLiveStats;
+uint64_t bb_xip_misses(void);
+void bb_live_print_extra(void (*say)(const char *fmt, ...));
+uint64_t bb_now_us(void);
 void bb_live_get_stats(BbLiveStats *s);
 const char *bb_live_fail_reason(void);
 

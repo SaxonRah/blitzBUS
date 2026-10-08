@@ -7,7 +7,8 @@ param(
     [switch]$NoBuild,
     [switch]$NoFlash,
     [switch]$NoInput,
-    [switch]$AutoTests
+    [switch]$AutoTests,
+    [switch]$PhaseProfile
 )
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -68,6 +69,7 @@ try {
     Write-Host '=== Interactive blitzBUS DOS console ==='
     Write-Host 'Type DOS commands. Ctrl+] requests counters; Ctrl+X exits. -AutoTests runs DOS2TEST and MDSTRESS automatically.'
     $text='';$dateSent=$false;$timeSent=$false;$testSent=$false;$stressSent=$false;$statsSent=$false
+    $all='';$phase=0;$phaseState='';$doneTarget=0;$deltaTarget=0;$phaseDoneAt=$null;$phases=@()
     $statsSentAt=$null
     $deadline=(Get-Date).AddSeconds($Seconds)
     while((Get-Date) -lt $deadline){
@@ -76,6 +78,7 @@ try {
             Write-Host -NoNewline $chunk
             [System.IO.File]::AppendAllText($log,$chunk)
             $text += $chunk
+            if($PhaseProfile){$all += $chunk}
             if($text.Length -gt 120000){$text=$text.Substring($text.Length-120000)}
             if($text.Contains('[blitzBUS] LCD panel init PASS')){$state.lcd='PASS'}
             if(!$dateSent -and $text.Contains('Enter new date:')){
@@ -123,7 +126,31 @@ try {
                 if(!$inputWarning){Write-Host '[blitzBUS] Keyboard not available in this host. Use a standard PowerShell console.';$inputWarning=$true}
             }
         }
-        if($AutoTests -and $statsSent -and $state.backend -eq 'blitz86-thumb2'){
+        if($PhaseProfile -and $statsSent){
+            # per-phase profile: MDSTRESS 1..9, Ctrl+] after each (delta counters)
+            $doneNow=[regex]::Matches($all,'deterministic checksum = 0x[0-9A-Fa-f]{4}').Count
+            $deltaM=[regex]::Matches($all,'\[bb-live-delta\][^\r\n]*\r?\n')
+            if($phase -eq 0 -and $deltaM.Count -ge 1){
+                $phase=1;$phaseState='run';$doneTarget=$doneNow+1;$deltaTarget=$deltaM.Count+1
+                $serial.Write("MDSTRESS 1`r");Write-Host '[blitzBUS] phase profile: MDSTRESS 1'
+            } elseif($phase -ge 1 -and $phase -le 9){
+                if($phaseState -eq 'run' -and $doneNow -ge $doneTarget){$phaseState='settle';$phaseDoneAt=Get-Date}
+                if($phaseState -eq 'settle' -and ((Get-Date)-$phaseDoneAt).TotalMilliseconds -gt 400){
+                    $serial.Write([string][char]0x1D);$phaseState='stats'
+                }
+                if($phaseState -eq 'stats' -and $deltaM.Count -ge $deltaTarget){
+                    $line=$deltaM[$deltaM.Count-1].Value
+                    $row=[ordered]@{phase=$phase}
+                    foreach($m in [regex]::Matches($line,'([a-z\-]+)=(\d+)')){$row[$m.Groups[1].Value]=[uint64]$m.Groups[2].Value}
+                    $phases += [pscustomobject]$row
+                    $phase++
+                    if($phase -le 9){
+                        $phaseState='run';$doneTarget=$doneNow+1;$deltaTarget=$deltaM.Count+1
+                        $serial.Write("MDSTRESS $phase`r");Write-Host "[blitzBUS] phase profile: MDSTRESS $phase"
+                    }
+                }
+            } elseif($phase -gt 9){break}
+        } elseif($AutoTests -and $statsSent -and $state.backend -eq 'blitz86-thumb2'){
             if($state.retired -gt 0 -and $state.blocks -gt 0 -and $state.ready){break}
             if(((Get-Date)-$statsSentAt).TotalSeconds -gt 5){break}
         }
@@ -136,6 +163,12 @@ try {
         if(!$state.ready -or $state.retired -eq 0 -or $state.blocks -eq 0){throw 'blitz86 counters missing/zero or JIT not ready'}
         $state.result='PASS'
         Write-Host "[blitzBUS] LIVE DOS JIT PASS retired=$($state.retired) blocks=$($state.blocks)"
+        if($PhaseProfile){
+            $state.phases=$phases
+            Write-Host '[blitzBUS] MDSTRESS per-phase profile (deltas):'
+            $phases | Format-Table phase,retired,native,translate,blocks,'native-misses','translate-misses','rt-step','rt-cond','rt-flags','rt-light','rt-smc',traps -AutoSize | Out-String | Write-Host
+            if($phases.Count -lt 9){Write-Host "[blitzBUS] WARNING: only $($phases.Count) phases profiled (raise -Seconds?)"}
+        }
     } elseif($quit){$state.result='INTERACTIVE_EXIT'}
     else {$state.result='CAPTURE_COMPLETE'}
 } catch {

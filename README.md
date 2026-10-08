@@ -1,4 +1,40 @@
-# blitzBUS v0.8 — blitz86 owns DOS execution
+# blitzBUS v0.8.3 — blitz86 owns DOS execution
+
+v0.8.3: measurement. Requires blitz86 (h).
+* XIP/QMI misses attributed to native execution and to translation.
+* `[bb-live-delta]` line: per-Ctrl+] deltas (retired, native ms, translate
+  ms, blocks, misses, C round trips by kind, BIOS traps).
+* `-PhaseProfile`: after the normal PASS flow, runs `MDSTRESS 1`..`9` one at
+  a time with counters after each and prints a per-phase table (also in the
+  JSON report as `phases`). Use a longer window:
+
+      .\scripts\bb_live_run.ps1 -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 -Port COM5 -Seconds 400 -AutoTests -PhaseProfile
+
+---
+
+# blitzBUS v0.8.2
+
+v0.8.2: requires blitz86 (g). The previous hardware run spent most native
+time in 2.5M interpreter-helper round trips (rotates, PUSHF/POPF, SAHF/LAHF,
+MUL flags, DIV); blitz86 (g) runs them natively (50K helpers left). bb_live
+now syncs only the ~10 pages that hold translated code (sync was 259 ms).
+
+---
+
+# blitzBUS v0.8.1
+
+v0.8.1 (after the first hardware run: correct, but slower than the
+interpreter because of XIP/QMI cache misses):
+* microDOS filters its own stores byte-exactly (TRBYTES bitmaps fed by
+  blitz86's code hook, 64 pages x 512 B in SRAM): page syncs 6,513 -> 399.
+* blitz86 code runs from SRAM (`B86_RAM_FUNCS=1`), not flash XIP.
+* Dispatcher re-entries hit the SRAM fast table first.
+* New stats line: `[bb-live-time] native= ms (translate= ms) sync= ms
+  flushes= dispatches= fast=` — the next hardware run shows where time goes.
+
+---
+
+# blitzBUS v0.8
 
 v0.8 replaces the read-only differential gate with an **owner-mode** live
 backend: blitz86 runs the guest natively inside microDOS's DOS system loop
