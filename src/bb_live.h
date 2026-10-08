@@ -1,8 +1,33 @@
 #ifndef BB_LIVE_H
 #define BB_LIVE_H
+/* blitzBUS live backend: blitz86 OWNS guest execution inside the microDOS
+ * DOS system loop. microDOS keeps the BIOS segment (driver trampolines),
+ * its INT hooks (console/disk/clock HLE) and port I/O; blitz86 runs
+ * everything else natively and commits state back after every slice. */
 #include "microdos/runtime.h"
 #include <stdint.h>
-int bb_live_try(MdRuntime *rt);
+
+/* Run guest code natively from the current CS:IP. Returns nonzero if any
+   architectural progress was made (the caller loops), 0 to let microDOS
+   execute (BIOS segment, backend disabled or failed to start). */
+int bb_live_try(MdRuntime *rt, uint64_t left);
+
+/* Runtime switch (default on). Off = microDOS interprets everything. */
+void bb_live_set_enabled(int on);
+
+typedef struct BbLiveStats {
+    uint64_t retired;          /* guest instructions retired by blitz86   */
+    uint64_t slices;           /* bb_live_try calls that ran native code  */
+    uint64_t traps;            /* slices ended by reaching the BIOS seg   */
+    uint64_t hook_calls;       /* INT vectors serviced by microDOS hooks  */
+    uint64_t page_syncs;         /* pages microDOS wrote (checked)        */
+    uint64_t page_invalidations; /* code lines that actually changed       */
+    uint64_t halts;
+} BbLiveStats;
+void bb_live_get_stats(BbLiveStats *s);
+const char *bb_live_fail_reason(void);
+
+/* Compatibility accessors used by the generated Pico stats block. */
 uint64_t bb_live_retired(void);
 uint64_t bb_live_blocks(void);
 int bb_live_ready(void);

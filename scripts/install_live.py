@@ -31,33 +31,32 @@ def main():
         raise SystemExit('Expected fast interpreter path not found exactly once; originals untouched')
     sys_text = sys_text.replace(fastpath, fastpath + ' && !defined(BLITZBUS_LIVE_BACKEND)', 1)
     sys_text='#include "bb_live.h"\n'+sys_text
-    sys_text=sys_text.replace(sys_anchor,sys_anchor+'\n        if (bb_live_try(rt)) continue;',1)
+    sys_text=sys_text.replace(sys_anchor,sys_anchor+'\n        if (bb_live_try(rt, left)) continue;',1)
     pico_text='#include "bb_live.h"\n'+pico_text
     pico_text=pico_text.replace(pico_anchor,'#define MD_GUEST_BYTES (MD_X86_ADDRESS_SPACE + 0x10020u)',1)
+    # blitz86's SMC line map is indexed by host address >> 6: the guest buffer
+    # must be 64-byte aligned (blitz86 refuses otherwise).
+    guest_decl='__uninitialized_psram("md_guest") __attribute__((aligned(16)))'
+    if pico_text.count(guest_decl)!=1:
+        raise SystemExit('Guest buffer declaration changed; originals untouched')
+    pico_text=pico_text.replace(guest_decl,'__uninitialized_psram("md_guest") __attribute__((aligned(64)))',1)
     # Send the live counters on every Ctrl+] stats request, not only milestones.
     # Generate *actual C lines*.  The C format strings use escaped newline bytes.
     stats_block = r'''g_con.stats_requested=false;md_stats(start_us);
             md_say("[bb-live] backend=blitz86-thumb2 retired=%llu blocks=%llu ready=%d\n",
                 (unsigned long long)bb_live_retired(),
                 (unsigned long long)bb_live_blocks(),bb_live_ready());
-            { uint64_t a,c,i,f,r; uint16_t cs,ip; uint8_t op;
-              bb_live_diag(&a,&c,&i,&f,&r,&cs,&ip,&op);
-              md_say("[bb-live-diag] attempts=%llu candidates=%llu init=%llu init_fail=%llu run_fail=%llu last=%04X:%04X op=%02X\n",
-                (unsigned long long)a,(unsigned long long)c,(unsigned long long)i,
-                (unsigned long long)f,(unsigned long long)r,cs,ip,op);
-              md_say("[bb-live-diff] field=%s expected=%04X actual=%04X disabled=%d\n",
-                bb_live_diff_field(),bb_live_diff_expected(),bb_live_diff_actual(),
-                bb_live_ready()?0:1);
-              { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
-                bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
-                md_say("[bb-live-rc] code=%d delta=%llu expected_ip=%04X actual_ip=%04X budget=%llu exit=%llu halt=%llu other=%llu\n",
-                   rc,(unsigned long long)delta,ei,ai,(unsigned long long)b,
-                   (unsigned long long)e,(unsigned long long)h,(unsigned long long)o);
-                md_say("[bb-live-guard] verified=%llu fallback=%llu disabled=%llu\n",
-                   (unsigned long long)v,(unsigned long long)fb,(unsigned long long)d); }
-            }'''
+            { BbLiveStats bs; bb_live_get_stats(&bs);
+              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu halts=%llu fail=%s\n",
+                (unsigned long long)bs.slices,(unsigned long long)bs.traps,(unsigned long long)bs.hook_calls,
+                (unsigned long long)bs.page_syncs,(unsigned long long)bs.page_invalidations,
+                (unsigned long long)bs.halts,bb_live_fail_reason()); }
+            { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
+              bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
+              md_say("[bb-jit] last-rc=%d chains=%llu smc-inval=%llu helpers=%llu\n",
+                rc,(unsigned long long)b,(unsigned long long)e,(unsigned long long)o); }'''
     pico_text = pico_text.replace('g_con.stats_requested=false;md_stats(start_us);', stats_block, 1)
-    if pico_text.count('[bb-live-rc]') != 1 or pico_text.count('[bb-live-guard]') != 1:
+    if pico_text.count('[bb-live-owner]') != 1 or pico_text.count('[bb-jit]') != 1:
         raise SystemExit('Live stats insertion failed')
     # Guard against the escaped-newline regression before emitting generated C.
     if r';\n            md_say' in pico_text:
@@ -91,7 +90,10 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/src/system"
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
-    B86_MAXB=256 B86_MAP_BITS=10
+    B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
+    BB_CODE_BYTES=196608u BB_HOT_BYTES=32768u
+    B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free
+    MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
     BLITZBUS_LCD_CONSOLE=1
     MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD=40000000u)

@@ -273,7 +273,7 @@ MdStopReason MD_EXEC_HOT_FUNC(md_dos2_system_run)(MdDos2System *sys, uint64_t bu
 
         if (used >= budget) break;
         left = budget - used;
-        if (bb_live_try(rt)) continue;
+        if (bb_live_try(rt, left)) continue;
 
 #ifdef MICRODOS_ENABLE_NATIVE3
         if (rt->cpu.cs != sys->boot.bios_segment) {

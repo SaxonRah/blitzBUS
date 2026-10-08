@@ -83,7 +83,7 @@ static uint8_t g_guest[MD_GUEST_BYTES] __attribute__((aligned(16)));
 static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(MD_GUEST_BYTES)))
     g_guest[MD_GUEST_BYTES];
 #else
-static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(16)))
+static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(64)))
     g_guest[MD_GUEST_BYTES];
 #endif
 #endif
@@ -1058,22 +1058,15 @@ int main(void)
             md_say("[bb-live] backend=blitz86-thumb2 retired=%llu blocks=%llu ready=%d\n",
                 (unsigned long long)bb_live_retired(),
                 (unsigned long long)bb_live_blocks(),bb_live_ready());
-            { uint64_t a,c,i,f,r; uint16_t cs,ip; uint8_t op;
-              bb_live_diag(&a,&c,&i,&f,&r,&cs,&ip,&op);
-              md_say("[bb-live-diag] attempts=%llu candidates=%llu init=%llu init_fail=%llu run_fail=%llu last=%04X:%04X op=%02X\n",
-                (unsigned long long)a,(unsigned long long)c,(unsigned long long)i,
-                (unsigned long long)f,(unsigned long long)r,cs,ip,op);
-              md_say("[bb-live-diff] field=%s expected=%04X actual=%04X disabled=%d\n",
-                bb_live_diff_field(),bb_live_diff_expected(),bb_live_diff_actual(),
-                bb_live_ready()?0:1);
-              { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
-                bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
-                md_say("[bb-live-rc] code=%d delta=%llu expected_ip=%04X actual_ip=%04X budget=%llu exit=%llu halt=%llu other=%llu\n",
-                   rc,(unsigned long long)delta,ei,ai,(unsigned long long)b,
-                   (unsigned long long)e,(unsigned long long)h,(unsigned long long)o);
-                md_say("[bb-live-guard] verified=%llu fallback=%llu disabled=%llu\n",
-                   (unsigned long long)v,(unsigned long long)fb,(unsigned long long)d); }
-            }}
+            { BbLiveStats bs; bb_live_get_stats(&bs);
+              md_say("[bb-live-owner] slices=%llu traps=%llu hooks=%llu page-syncs=%llu code-lines-changed=%llu halts=%llu fail=%s\n",
+                (unsigned long long)bs.slices,(unsigned long long)bs.traps,(unsigned long long)bs.hook_calls,
+                (unsigned long long)bs.page_syncs,(unsigned long long)bs.page_invalidations,
+                (unsigned long long)bs.halts,bb_live_fail_reason()); }
+            { int rc; uint64_t delta,v,fb,d,b,e,h,o; uint16_t ei,ai;
+              bb_live_status(&rc,&delta,&ei,&ai,&v,&fb,&d,&b,&e,&h,&o);
+              md_say("[bb-jit] last-rc=%d chains=%llu smc-inval=%llu helpers=%llu\n",
+                rc,(unsigned long long)b,(unsigned long long)e,(unsigned long long)o); }}
         if(stop!=MD_STOP_NONE)break;
     }
     md_say("\n[microDOS] guest stopped: %s\n",md_stop_reason_name(stop));
