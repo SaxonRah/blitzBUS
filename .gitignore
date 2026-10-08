@@ -4,3 +4,4 @@ build/
 *.uf2
 *.elf
 __pycache__/
+/build-host

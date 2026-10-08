@@ -7,7 +7,7 @@ if /I "%CMD%"=="install" (
   exit /b %ERRORLEVEL%
 )
 if /I "%CMD%"=="upgrade" (
-  python "%~dp0scripts\upgrade_v03.py" %2 %3 %4 %5 %6 %7 %8 %9
+  python "%~dp0scripts\upgrade_v04.py" %2 %3 %4 %5 %6 %7 %8 %9
   exit /b %ERRORLEVEL%
 )
 if /I "%CMD%"=="restore" (

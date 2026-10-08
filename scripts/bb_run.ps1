@@ -19,7 +19,7 @@ $report=Join-Path $logs "bb-$stamp-report.json"
 $uf2=Join-Path $MicroDos 'build-pico\out\microdos_pico.uf2'
 $picotool=Join-Path $HOME '.pico-sdk\picotool\2.3.0\picotool\picotool.exe'
 $serial=$null
-$state=[ordered]@{name='blitzBUS';timestamp=$stamp;target='microdos_pico';port=$Port;build='SKIPPED';flash='SKIPPED';cdc='NOT_OPENED';boot='NOT_OBSERVED';dos2test='NOT_RUN';lcd='NOT_HARDWARE_VERIFIED';audio='NOT_INTEGRATED';transcript=$log;result='INCOMPLETE';error=''}
+$state=[ordered]@{name='blitzBUS';timestamp=$stamp;target='microdos_pico';port=$Port;build='SKIPPED';flash='SKIPPED';cdc='NOT_OPENED';boot='NOT_OBSERVED';dos2test='NOT_RUN';lcd='NOT_HARDWARE_VERIFIED';audio='NOT_INTEGRATED';cpu_engine='microDOS AOT/interpreter';blitz86_dos_active=$false;transcript=$log;result='INCOMPLETE';error=''}
 function Save-Report { $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $report -Encoding UTF8 }
 function Checked([string]$label,[scriptblock]$task){
  Write-Host "=== $label ==="
