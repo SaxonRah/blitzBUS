@@ -12,6 +12,9 @@ def main():
     p.add_argument('--blitz86',default=r'C:\blitz86_v2')
     a=p.parse_args()
     lcd_hz=os.environ.get("BB_LCD_SPI_HZ","40000000")
+    lcd_lace=os.environ.get("BB_LCD_LACE","0")
+    if lcd_lace not in ("0","1"):
+        raise SystemExit("BB_LCD_LACE must be 0 (full) or 1 (alternating rows)")
     lcd_peri=os.environ.get("BB_LCD_PERI_HZ","150000000")
     if lcd_peri not in ("48000000","150000000"):
         raise SystemExit("BB_LCD_PERI_HZ must be 48000000 or 150000000")
@@ -139,7 +142,7 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
     BLITZBUS_LCD_CONSOLE=1
-    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u)
+    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u BB_LCD_LACE={lcd_lace})
 target_sources(blitzbus_pico_b86_dos PRIVATE
     "{(root/'src/bb_lcd_console.c').as_posix()}"
     "${{MD_ROOT}}/blitzbus-overlay/mr_pico_ili9341.c"

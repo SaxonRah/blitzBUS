@@ -165,8 +165,21 @@ void bb_lcd_console_flush(void){
  */
 #define BB_V27_W 480u
 #define BB_V27_H 300u
-#define BB_V27_TILE_H 12u
+/* v32: 0 = exact full-frame v31 path; 1 = true alternate scanline fields.
+   Interlaced: one LCD scanline per window; each parity updates 150 rows.
+   Two fields restore all 300 rows. Avoid counting field FPS as full-frame FPS. */
+#ifndef BB_LCD_LACE
+#define BB_LCD_LACE 0
+#endif
+#if BB_LCD_LACE
+#define BB_V27_TILE_H 1u
+#define BB_V27_TILES (BB_V27_H / 2u)
+#define BB_V32_DEST_Y(i,parity) ((parity) + (i)*2u)
+#else
+#define BB_V27_TILE_H 30u
 #define BB_V27_TILES (BB_V27_H / BB_V27_TILE_H)
+#define BB_V32_DEST_Y(i,parity) ((i)*BB_V27_TILE_H)
+#endif
 static uint16_t bb_v27_tiles[2][BB_V27_W * BB_V27_TILE_H];
 static volatile uint32_t bb_v27_request;
 static volatile uint32_t bb_v27_busy;
@@ -175,6 +188,7 @@ static uint32_t bb_v27_started;
 static uint8_t bb_v27_was_vga;
 static volatile uint32_t bb_v27_frames;
 static volatile uint32_t bb_v27_strips;
+static unsigned bb_v32_field_parity;
 /* Core 1 owns these monotonically increasing counters; Core 0 only reads. */
 static volatile uint32_t bb_v29_stage; /* 0 idle, 1 convert, 2 DMA begin, 3 DMA wait, 4 completed */
 static volatile uint32_t bb_v29_heartbeat_us;
@@ -192,22 +206,54 @@ static uint32_t bb_v28_report_frame;
 static uint32_t bb_v28_poll;
 
 
-/* Exact nearest-neighbour 320 -> 480, with rows 0,0,1 for 2 -> 3. */
-static void bb_v27_convert(unsigned top, uint16_t *dst) {
-    const uint8_t *fb = bb_vga_framebuffer();
-    const uint16_t *pal = bb_vga_palette565();
-    if (!fb || !pal) { memset(dst,0,BB_V27_W*BB_V27_TILE_H*2u); return; }
-    for (unsigned y=0; y<BB_V27_TILE_H; ++y) {
-        const unsigned out_y=top+y;
-        const unsigned src_y=(out_y/3u)*2u+((out_y%3u)==2u);
-        const uint8_t *src=fb+src_y*320u;
-        uint16_t *out=dst+y*BB_V27_W;
-        for (unsigned x=0; x<320u; x+=2u) {
-            uint16_t a=pal[src[x]], b=pal[src[x+1u]];
-            *out++=a; *out++=a; *out++=b;
-        }
+/* v31: exact 320x200 -> 480x300 3:2 nearest-neighbour expansion.
+ * Every 3 destination scanlines are source rows A, A, B. Generate A once,
+ * duplicate its expanded RGB565 row using memcpy, then generate B. All
+ * 30-row tile origins are multiples of three; no division/modulo per row.
+ * Preserve the existing color ordering, including palette changes.
+ */
+static inline void bb_v31_expand_row(const uint8_t *src,
+                                     const uint16_t *pal,
+                                     uint16_t *restrict dst) {
+    for (unsigned x=0u; x<320u; x+=2u) {
+        const uint16_t a=pal[src[x]];
+        const uint16_t b=pal[src[x+1u]];
+        dst[0]=a; dst[1]=a; dst[2]=b;
+        dst+=3;
     }
 }
+#if BB_LCD_LACE
+/* Display coordinates y=0..299 correspond to 320x200 mode 13h.
+   floor(y*2/3) is the exact nearest-neighbour v31 mapping A,A,B. */
+static void bb_v27_convert(unsigned top, uint16_t *dst) {
+    const uint8_t *fb=bb_vga_framebuffer();
+    const uint16_t *pal=bb_vga_palette565();
+    if (!fb || !pal) {
+        memset(dst,0,BB_V27_W*sizeof(*dst));
+        return;
+    }
+    const unsigned src_y=(top*2u)/3u;
+    bb_v31_expand_row(fb+src_y*320u,pal,dst);
+}
+#else
+static void bb_v27_convert(unsigned top, uint16_t *dst) {
+    const uint8_t *fb=bb_vga_framebuffer();
+    const uint16_t *pal=bb_vga_palette565();
+    if (!fb || !pal) {
+        memset(dst,0,BB_V27_W*BB_V27_TILE_H*sizeof(*dst));
+        return;
+    }
+    const unsigned first_src=(top/3u)*2u;
+    for (unsigned y=0u;y<BB_V27_TILE_H;y+=3u) {
+        const unsigned src_y=first_src+(y/3u)*2u;
+        uint16_t *out=dst+y*BB_V27_W;
+        bb_v31_expand_row(fb+src_y*320u,pal,out);
+        memcpy(out+BB_V27_W,out,BB_V27_W*sizeof(*out));
+        bb_v31_expand_row(fb+(src_y+1u)*320u,pal,out+2u*BB_V27_W);
+    }
+}
+
+#endif
 
 static void bb_v27_presenter(void) {
     for (;;) {
@@ -227,17 +273,18 @@ static void bb_v27_presenter(void) {
         const uint32_t frame_start=time_us_32();
         uint32_t convert_total=0u, dma_total=0u;
         unsigned current=0u;
+        const unsigned field_parity=bb_v32_field_parity;
         uint32_t t=time_us_32();
-        bb_v27_convert(0u,bb_v27_tiles[current]);
+        bb_v27_convert(BB_V32_DEST_Y(0u,field_parity),bb_v27_tiles[current]);
         convert_total+=(uint32_t)(time_us_32()-t);
         __atomic_store_n(&bb_v29_stage,2u,__ATOMIC_RELAXED);
-        mr_pico_ili9341_flush_begin(NULL,0,10,BB_V27_W,BB_V27_TILE_H,
+        mr_pico_ili9341_flush_begin(NULL,0,(int)(10u+BB_V32_DEST_Y(0u,field_parity)),BB_V27_W,BB_V27_TILE_H,
                                      bb_v27_tiles[current],&lcd);
         for (unsigned i=1u;i<BB_V27_TILES;i++) {
             const unsigned next=current^1u;
             /* Convert next strip while SPI DMA transfers current strip. */
             t=time_us_32();
-            bb_v27_convert(i*BB_V27_TILE_H,bb_v27_tiles[next]);
+            bb_v27_convert(BB_V32_DEST_Y(i,field_parity),bb_v27_tiles[next]);
             convert_total+=(uint32_t)(time_us_32()-t);
             t=time_us_32();
             __atomic_store_n(&bb_v29_stage,3u,__ATOMIC_RELAXED);
@@ -247,7 +294,7 @@ static void bb_v27_presenter(void) {
             __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
             if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE))
                 goto stop_presenting;
-            mr_pico_ili9341_flush_begin(NULL,0,(int)(10u+i*BB_V27_TILE_H),
+            mr_pico_ili9341_flush_begin(NULL,0,(int)(10u+BB_V32_DEST_Y(i,field_parity)),
                                         BB_V27_W,BB_V27_TILE_H,
                                         bb_v27_tiles[next],&lcd);
             current=next;
@@ -266,6 +313,9 @@ static void bb_v27_presenter(void) {
         __atomic_store_n(&bb_v29_stage,4u,__ATOMIC_RELAXED);
         __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
         __atomic_add_fetch(&bb_v27_frames,1u,__ATOMIC_RELAXED);
+#if BB_LCD_LACE
+        bb_v32_field_parity^=1u;
+#endif
 stop_presenting:
         /* On return to text mode, release LCD ownership before core 0
            redraws the DOS console.  Never leave DMA in flight. */
@@ -278,6 +328,15 @@ void bb_lcd_vga_tick(void) {
     if (!active) return;
     if (bb_vga_active()) {
         if (!bb_v27_started) {
+            printf("[bb-v32-mode] %s rows=%u windows=%u bytes=%lu; fps_x10 counts %s\n",
+#if BB_LCD_LACE
+                "lace",(unsigned)(BB_V27_TILES*BB_V27_TILE_H), (unsigned)BB_V27_TILES,
+                (unsigned long)(BB_V27_W*BB_V27_TILES*BB_V27_TILE_H*2u),"fields (two parity fields = one screen)"
+#else
+                "full",(unsigned)(BB_V27_TILES*BB_V27_TILE_H), (unsigned)BB_V27_TILES,
+                (unsigned long)(BB_V27_W*BB_V27_TILES*BB_V27_TILE_H*2u),"complete frames"
+#endif
+            ); fflush(stdout);
             bb_v27_started=1u;
             multicore_launch_core1(bb_v27_presenter);
         }
