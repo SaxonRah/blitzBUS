@@ -1,4 +1,4 @@
-/* blitzBUS v0.7.6: reference-first, read-only differential JIT validation.
+/* blitzBUS v0.7.6.2: reference-first, read-only differential JIT validation.
  * microDOS always owns authoritative state. No JIT state is committed.
  * Only one-byte, register/flags-only opcodes are eligible.
  */
@@ -94,17 +94,20 @@ int bb_live_try(MdRuntime *rt) {
     else if (rc==B86_EXIT) ++bb_exit_stops;
     else if (rc==B86_HALT) ++bb_halt_stops;
     else ++bb_other_stops;
-    if (rc != B86_BUDGET || bb_last_delta != 1u) {
+    if (rc != B86_BUDGET) {
         /* Reference already committed. Never copy the native state. */
         bb_diff_field=(rc==B86_EXIT)?"jit-exit":
                       (rc==B86_HALT)?"jit-halt":
-                      (rc==B86_BUDGET)?"jit-retire":"jit-unknown-rc";
+                      (rc==B86_BUDGET)?"jit-budget":"jit-unknown-rc";
         bb_diff_expected=(uint16_t)B86_BUDGET;
         bb_diff_actual=(uint16_t)rc;
         ++bb_runtime_failures;
         bb_failed=1;
         return 1;
     }
+    /* A B86_BUDGET return with the expected IP and CPU state is valid.
+     * B86JitStats.guest_insns may not increment on every dispatch, so its
+     * delta is telemetry rather than a correctness gate. */
     if (mismatch("CS",rt->cpu.cs,(uint16_t)bb_cpu.seg[B86_CS]) ||
         mismatch("IP",rt->cpu.ip,(uint16_t)bb_cpu.ip) ||
         mismatch("ES",rt->cpu.es,(uint16_t)bb_cpu.seg[B86_ES]) ||

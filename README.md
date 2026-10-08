@@ -1,12 +1,16 @@
-# blitzBUS v0.7.6.1 — generator newline fix
+# blitzBUS v0.7.6.2 — JIT counter-gate correction
 
-Corrects `scripts/install_live.py` from v0.7.6. The v0.7.6 stats insertion accidentally wrote literal `\n` outside C string literals into generated `bb_microdos_pico.c`, causing GCC `stray '\'` errors. This replacement emits actual source lines, preserving `\n` only inside C format strings.
+This overlay replaces only `src/bb_live.c` and `src/bb_live.h`. It retains the v0.7.6.1 installer, LCD, COM console, reference-first execution, and diagnostics.
 
-Extract this ZIP over `C:\blitzBUS` (replace `scripts\install_live.py`; the package also includes full v0.7.6 sources). Run:
+The previous adapter treated `B86JitStats.guest_insns` incrementing by exactly one as a mandatory condition. The prior hardware log showed `B86_BUDGET` (3), correct next IP, but `delta=0` on the fourth candidate (CLD). `guest_insns` is diagnostic telemetry; it is not a reliable single-dispatch correctness oracle.
+
+v0.7.6.2 requires `B86_BUDGET` and compares the resulting CS, IP, general/segment registers and defined FLAGS against the authoritative interpreter step. If a comparison differs, further JIT validation is disabled. The JIT state is never committed.
+
+Install: extract ZIP into `C:\blitzBUS` (the ZIP contains `src/` at its root), replacing files.
 
 ```powershell
 cd C:\blitzBUS
 .\scripts\bb_live_run.ps1 -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 -Port COM5 -Seconds 180 -AutoTests
 ```
 
-Do not specify `-NoBuild` or `-NoFlash`. The installer regenerates the C file before building. No edit to `C:\microDOS` original C files is necessary. Firmware behavior remains experimental and should be assessed by the diagnostic output.
+Do not use `-NoBuild` or `-NoFlash`. Hardware tests are not yet run.
