@@ -244,11 +244,9 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
         uint16_t ax=(uint16_t)c->r[B86_AX], bx=(uint16_t)c->r[B86_BX];
         uint16_t cx=(uint16_t)c->r[B86_CX], dx=(uint16_t)c->r[B86_DX];
         uint16_t f=b86_get_flags(c);
-        uint16_t es=(uint16_t)c->seg[B86_ES], bp=(uint16_t)c->r[B86_BP];
-        if (bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f)) {
+        if (bb_vga_int10(&ax,&bx,&cx,&dx,&f)) {
             c->r[B86_AX]=ax; c->r[B86_BX]=bx;
             c->r[B86_CX]=cx; c->r[B86_DX]=dx;
-            c->r[B86_BP]=bp; b86_set_seg(c,B86_ES,es);
             b86_set_flags(c,f);
             ++st.hook_calls;
             if (bb_trace_ints<=24u) {
@@ -374,7 +372,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     fprintf(stderr, "[bb]   rc=%d exit %04X:%04X retired=%u\n", rc, rt->cpu.cs, rt->cpu.ip, C.icnt);
 #endif
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-    bb_lcd_vga_tick();
+    /* VGA LCD refresh disabled for diagnostic */
 #endif
     rt->instructions += C.icnt;
     st.retired += C.icnt;

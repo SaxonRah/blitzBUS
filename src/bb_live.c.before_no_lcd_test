@@ -23,7 +23,6 @@
 #include "b86.h"
 #include "msdos2_boot.h"
 #include <string.h>
-#include <stdio.h>
 #ifdef BB_DEBUG
 #include <stdio.h>
 #endif
@@ -223,39 +222,17 @@ B86_HOT static void sync_pages(void)
 #endif
 }
 
-/* Bounded diagnostics: declarations before B86_HOT function sections. */
-static uint32_t bb_trace_ints, bb_trace_in201, bb_trace_in3da, bb_trace_runs;
-static void bb_trace_port(uint16_t port, uint8_t result, uint32_t n) {
-    if (n<=8u || (n<=4096u && (n&(n-1u))==0u)) {
-        printf("[bb-trace] IN %04X n=%lu value=%02X cs:ip=%04X:%04X\n",(unsigned)port,
-               (unsigned long)n,(unsigned)result,(unsigned)C.seg[B86_CS],(unsigned)C.ip);
-        fflush(stdout);
-    }
-}
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
     if (v == 0x10u) {
-        if (++bb_trace_ints<=24u) {
-            printf("[bb-trace] INT10 enter n=%lu ax=%04X cs:ip=%04X:%04X sp=%04X\n",
-                   (unsigned long)bb_trace_ints,(unsigned)c->r[B86_AX],
-                   (unsigned)c->seg[B86_CS],(unsigned)c->ip,(unsigned)c->r[B86_SP]);
-            fflush(stdout);
-        }
         uint16_t ax=(uint16_t)c->r[B86_AX], bx=(uint16_t)c->r[B86_BX];
         uint16_t cx=(uint16_t)c->r[B86_CX], dx=(uint16_t)c->r[B86_DX];
         uint16_t f=b86_get_flags(c);
-        uint16_t es=(uint16_t)c->seg[B86_ES], bp=(uint16_t)c->r[B86_BP];
-        if (bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f)) {
+        if (bb_vga_int10(&ax,&bx,&cx,&dx,&f)) {
             c->r[B86_AX]=ax; c->r[B86_BX]=bx;
             c->r[B86_CX]=cx; c->r[B86_DX]=dx;
-            c->r[B86_BP]=bp; b86_set_seg(c,B86_ES,es);
             b86_set_flags(c,f);
             ++st.hook_calls;
-            if (bb_trace_ints<=24u) {
-                printf("[bb-trace] INT10 handled ax=%04X cs:ip=%04X:%04X sp=%04X\n",
-                       (unsigned)ax,(unsigned)c->seg[B86_CS],(unsigned)c->ip,(unsigned)c->r[B86_SP]);
-                fflush(stdout);
-            }
             return 1;
         }
     }
@@ -275,11 +252,7 @@ B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     uint8_t result;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
-    if (bb_vga_port_in(port,&result,time_us_64())) {
-        if(port==0x201u)bb_trace_port(port,result,++bb_trace_in201);
-        if(port==0x3DAu)bb_trace_port(port,result,++bb_trace_in3da);
-        return result;
-    }
+    if (bb_vga_port_in(port,&result,time_us_64())) return result;
 #else
     if (bb_vga_port_in(port,&result,0)) return result;
 #endif
@@ -352,20 +325,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     fprintf(stderr, "[bb] slice %llu enter %04X:%04X\n", (unsigned long long)st.slices, rt->cpu.cs, rt->cpu.ip);
 #endif
     uint64_t m1 = bb_xip_misses();
-    ++bb_trace_runs;
-    if(bb_trace_runs<=8u || (bb_trace_runs<=65536u && (bb_trace_runs&(bb_trace_runs-1u))==0u)) {
-        printf("[bb-trace] JIT enter n=%lu cs:ip=%04X:%04X ax=%04X sp=%04X\n",
-               (unsigned long)bb_trace_runs,(unsigned)C.seg[B86_CS],(unsigned)C.ip,
-               (unsigned)C.r[B86_AX],(unsigned)C.r[B86_SP]);
-        fflush(stdout);
-    }
     int rc = b86_jit_run(&C, BB_SLICE_DISPATCH);
-    if(bb_trace_runs<=8u || (bb_trace_runs<=65536u && (bb_trace_runs&(bb_trace_runs-1u))==0u)) {
-        printf("[bb-trace] JIT leave n=%lu rc=%d retired=%lu cs:ip=%04X:%04X\n",
-               (unsigned long)bb_trace_runs,rc,(unsigned long)C.icnt,
-               (unsigned)C.seg[B86_CS],(unsigned)C.ip);
-        fflush(stdout);
-    }
     st.native_us += bb_now_us() - t1;
     st.native_misses += bb_xip_misses() - m1;
     last_rc = rc;
