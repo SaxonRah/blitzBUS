@@ -8,6 +8,8 @@
 #include "gfx_font5x7.h"
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "hardware/clocks.h"
+#include "hardware/spi.h"
 #include <stdio.h>
 #include <string.h>
 #define COLS 80u
@@ -64,9 +66,64 @@ static void status_update(void){
 void bb_lcd_console_init(void){
     memset(cells,' ',sizeof cells);memset(dirty,1,sizeof dirty);
     puts("[blitzBUS] LCD SPI init begin");fflush(stdout);
-    mr_pico_ili9341_init(&lcd);puts("[blitzBUS] LCD SPI init PASS");fflush(stdout);
+    printf("[bb-v29-clock] pre-init clk-sys=%lu clk-peri=%lu requested-spi=%lu\n",
+        (unsigned long)clock_get_hz(clk_sys),
+        (unsigned long)clock_get_hz(clk_peri),
+        (unsigned long)lcd.spi_baud_hz); fflush(stdout);
+    /* v30: clk_sys is already 300 MHz with the project's PSRAM timing.
+       Reparent ONLY clk_peri to clk_sys and divide to 150 MHz.
+       USB's independent 48 MHz clock and the 300 MHz CPU clock are untouched.
+       Use BB_LCD_PERI_HZ=48000000 at build time for the previous behavior.
+       All clock adjustments occur before any SPI or DMA initialization. */
+#if BB_LCD_PERI_HZ == 150000000u
+    {
+        const uint32_t sys_hz=clock_get_hz(clk_sys);
+        const bool ok=(sys_hz >= 150000000u) &&
+            clock_configure(clk_peri,0u,
+                CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                sys_hz,150000000u);
+        printf("[bb-v30-clock] clk-peri-150 request sys=%lu result=%s actual=%lu\n",
+            (unsigned long)sys_hz, ok?"OK":"FALLBACK",
+            (unsigned long)clock_get_hz(clk_peri));fflush(stdout);
+        if (!ok || clock_get_hz(clk_peri)!=150000000u) {
+            /* RP2350 clk_peri has no CLK_USB AUXSRC selector.
+               Recover from the known 300 MHz clk_sys source instead.
+               300 MHz / 6.25 = 48 MHz (fractional divider). */
+            const bool fallback=clock_configure(clk_peri,0u,
+                CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                sys_hz,48000000u);
+            printf("[bb-v30-clock] fallback-48 result=%s actual=%lu\n",
+                fallback?"OK":"FAILED",(unsigned long)clock_get_hz(clk_peri));
+            fflush(stdout);
+        }
+    }
+#else
+    printf("[bb-v30-clock] 48 MHz compatibility mode clk-peri=%lu\n",
+        (unsigned long)clock_get_hz(clk_peri));fflush(stdout);
+#endif
+    /* SPI cannot outrun its peripheral clock.  Reject unsafe overclocking
+       before configuring or starting asynchronous transfers. */
+    if (lcd.spi_baud_hz > clock_get_hz(clk_peri)/2u) {
+        printf("[bb-v29-clock] REJECT requested=%lu: clk-peri=%lu, max-safe=%lu; using divider-2 rate\n",
+            (unsigned long)lcd.spi_baud_hz,
+            (unsigned long)clock_get_hz(clk_peri),
+            (unsigned long)(clock_get_hz(clk_peri)/2u)); fflush(stdout);
+        lcd.spi_baud_hz=clock_get_hz(clk_peri)/2u;
+    }
+    mr_pico_ili9341_init(&lcd);
+    printf("[bb-v29-clock] post-init clk-peri=%lu spi-actual=%lu prescale=%lu scr=%lu\n",
+        (unsigned long)clock_get_hz(clk_peri),
+        (unsigned long)spi_get_baudrate(lcd.spi),
+        (unsigned long)spi_get_hw(lcd.spi)->cpsr,
+        (unsigned long)((spi_get_hw(lcd.spi)->cr0 >> 8)&255u));
+    puts("[blitzBUS] LCD SPI init PASS");fflush(stdout);
     puts("[blitzBUS] LCD panel init begin (MADCTL=0xE8)");fflush(stdout);
-    mr_pico_ili9341_panel_init(&lcd);puts("[blitzBUS] LCD panel init PASS");fflush(stdout);
+    mr_pico_ili9341_panel_init(&lcd);
+    printf("[bb-v29-clock] post-panel clk-peri=%lu spi-actual=%lu driver-spi=%lu\n",
+        (unsigned long)clock_get_hz(clk_peri),
+        (unsigned long)spi_get_baudrate(lcd.spi),
+        (unsigned long)lcd.spi_baud_hz);
+    puts("[blitzBUS] LCD panel init PASS");fflush(stdout);
     puts("[blitzBUS] LCD clear begin");fflush(stdout);
     mr_pico_ili9341_fill_screen(&lcd,0x0000u,480,320);puts("[blitzBUS] LCD clear PASS");fflush(stdout);
     row=col=0;characters=paint_rows=batches=0;active=1;next_status_ms=0;
@@ -118,6 +175,22 @@ static uint32_t bb_v27_started;
 static uint8_t bb_v27_was_vga;
 static volatile uint32_t bb_v27_frames;
 static volatile uint32_t bb_v27_strips;
+/* Core 1 owns these monotonically increasing counters; Core 0 only reads. */
+static volatile uint32_t bb_v29_stage; /* 0 idle, 1 convert, 2 DMA begin, 3 DMA wait, 4 completed */
+static volatile uint32_t bb_v29_heartbeat_us;
+static volatile uint32_t bb_v28_convert_us;
+static volatile uint32_t bb_v28_dma_us;
+static volatile uint32_t bb_v28_frame_us;
+static volatile uint32_t bb_v28_max_frame_us;
+static volatile uint32_t bb_v28_last_frame_us;
+static uint32_t bb_v28_report_ms;
+static uint32_t bb_v28_report_frames;
+static uint32_t bb_v28_report_strips;
+static uint32_t bb_v28_report_convert;
+static uint32_t bb_v28_report_dma;
+static uint32_t bb_v28_report_frame;
+static uint32_t bb_v28_poll;
+
 
 /* Exact nearest-neighbour 320 -> 480, with rows 0,0,1 for 2 -> 3. */
 static void bb_v27_convert(unsigned top, uint16_t *dst) {
@@ -149,15 +222,28 @@ static void bb_v27_presenter(void) {
             __atomic_store_n(&bb_v27_busy,0u,__ATOMIC_RELEASE);
             continue;
         }
+        __atomic_store_n(&bb_v29_stage,1u,__ATOMIC_RELAXED);
+        __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
+        const uint32_t frame_start=time_us_32();
+        uint32_t convert_total=0u, dma_total=0u;
         unsigned current=0u;
+        uint32_t t=time_us_32();
         bb_v27_convert(0u,bb_v27_tiles[current]);
+        convert_total+=(uint32_t)(time_us_32()-t);
+        __atomic_store_n(&bb_v29_stage,2u,__ATOMIC_RELAXED);
         mr_pico_ili9341_flush_begin(NULL,0,10,BB_V27_W,BB_V27_TILE_H,
                                      bb_v27_tiles[current],&lcd);
         for (unsigned i=1u;i<BB_V27_TILES;i++) {
             const unsigned next=current^1u;
             /* Convert next strip while SPI DMA transfers current strip. */
+            t=time_us_32();
             bb_v27_convert(i*BB_V27_TILE_H,bb_v27_tiles[next]);
+            convert_total+=(uint32_t)(time_us_32()-t);
+            t=time_us_32();
+            __atomic_store_n(&bb_v29_stage,3u,__ATOMIC_RELAXED);
             mr_pico_ili9341_flush_wait(NULL,&lcd);
+            __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
+            dma_total+=(uint32_t)(time_us_32()-t);
             __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
             if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE))
                 goto stop_presenting;
@@ -166,8 +252,19 @@ static void bb_v27_presenter(void) {
                                         bb_v27_tiles[next],&lcd);
             current=next;
         }
+        t=time_us_32();
         mr_pico_ili9341_flush_wait(NULL,&lcd);
+        dma_total+=(uint32_t)(time_us_32()-t);
         __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
+        const uint32_t frame_us=(uint32_t)(time_us_32()-frame_start);
+        __atomic_add_fetch(&bb_v28_convert_us,convert_total,__ATOMIC_RELAXED);
+        __atomic_add_fetch(&bb_v28_dma_us,dma_total,__ATOMIC_RELAXED);
+        __atomic_add_fetch(&bb_v28_frame_us,frame_us,__ATOMIC_RELAXED);
+        __atomic_store_n(&bb_v28_last_frame_us,frame_us,__ATOMIC_RELAXED);
+        uint32_t max=__atomic_load_n(&bb_v28_max_frame_us,__ATOMIC_RELAXED);
+        if(frame_us>max)__atomic_store_n(&bb_v28_max_frame_us,frame_us,__ATOMIC_RELAXED);
+        __atomic_store_n(&bb_v29_stage,4u,__ATOMIC_RELAXED);
+        __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
         __atomic_add_fetch(&bb_v27_frames,1u,__ATOMIC_RELAXED);
 stop_presenting:
         /* On return to text mode, release LCD ownership before core 0
@@ -186,6 +283,38 @@ void bb_lcd_vga_tick(void) {
         }
         bb_v27_was_vga=1u;
         __atomic_store_n(&bb_v27_request,1u,__ATOMIC_RELEASE);
+        /* Cheap dispatch counter: only inspect time and counters occasionally. */
+        if ((++bb_v28_poll & 8191u)==0u) {
+            const uint32_t ms=to_ms_since_boot(get_absolute_time());
+            if (!bb_v28_report_ms) bb_v28_report_ms=ms;
+            if ((uint32_t)(ms-bb_v28_report_ms)>=1000u) {
+                const uint32_t f=__atomic_load_n(&bb_v27_frames,__ATOMIC_RELAXED);
+                const uint32_t st=__atomic_load_n(&bb_v27_strips,__ATOMIC_RELAXED);
+                const uint32_t cv=__atomic_load_n(&bb_v28_convert_us,__ATOMIC_RELAXED);
+                const uint32_t dm=__atomic_load_n(&bb_v28_dma_us,__ATOMIC_RELAXED);
+                const uint32_t ft=__atomic_load_n(&bb_v28_frame_us,__ATOMIC_RELAXED);
+                const uint32_t delta_ms=(uint32_t)(ms-bb_v28_report_ms);
+                printf("[bb-v28-lcd] fps_x10=%lu frames=%lu strips=%lu convert-ms=%lu dma-wait-ms=%lu frame-ms=%lu last-frame-us=%lu max-frame-us=%lu spi-hz=%lu\n",
+                    (unsigned long)(((f-bb_v28_report_frames)*10000u)/delta_ms),
+                    (unsigned long)(f-bb_v28_report_frames),
+                    (unsigned long)(st-bb_v28_report_strips),
+                    (unsigned long)((cv-bb_v28_report_convert)/1000u),
+                    (unsigned long)((dm-bb_v28_report_dma)/1000u),
+                    (unsigned long)((ft-bb_v28_report_frame)/1000u),
+                    (unsigned long)__atomic_load_n(&bb_v28_last_frame_us,__ATOMIC_RELAXED),
+                    (unsigned long)__atomic_load_n(&bb_v28_max_frame_us,__ATOMIC_RELAXED),
+                    (unsigned long)lcd.spi_baud_hz);
+                printf("[bb-v29-health] stage=%lu heartbeat-age-ms=%lu clk-peri=%lu spi-actual=%lu dma-active=%lu\n",
+                   (unsigned long)__atomic_load_n(&bb_v29_stage,__ATOMIC_RELAXED),
+                   (unsigned long)((uint32_t)(time_us_32()-__atomic_load_n(&bb_v29_heartbeat_us,__ATOMIC_RELAXED))/1000u),
+                   (unsigned long)clock_get_hz(clk_peri),
+                   (unsigned long)spi_get_baudrate(lcd.spi),
+                   (unsigned long)lcd.dma_active);
+                bb_v28_report_ms=ms; bb_v28_report_frames=f;
+                bb_v28_report_strips=st; bb_v28_report_convert=cv;
+                bb_v28_report_dma=dm; bb_v28_report_frame=ft;
+            }
+        }
         return;
     }
     __atomic_store_n(&bb_v27_request,0u,__ATOMIC_RELEASE);

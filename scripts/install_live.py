@@ -1,5 +1,6 @@
 """Install isolated live DOS/JIT proof target. Does not edit original C source."""
 import argparse
+import os
 from pathlib import Path
 
 BEGIN = '# === blitzBUS v0.7 LIVE DOS BEGIN ==='
@@ -10,6 +11,12 @@ def main():
     p.add_argument('--microdos',default=r'C:\microDOS')
     p.add_argument('--blitz86',default=r'C:\blitz86_v2')
     a=p.parse_args()
+    lcd_hz=os.environ.get("BB_LCD_SPI_HZ","40000000")
+    lcd_peri=os.environ.get("BB_LCD_PERI_HZ","150000000")
+    if lcd_peri not in ("48000000","150000000"):
+        raise SystemExit("BB_LCD_PERI_HZ must be 48000000 or 150000000")
+    if lcd_hz not in ("24000000","40000000","75000000"):
+        raise SystemExit("BB_LCD_SPI_HZ must be 24000000, 40000000 or 75000000")
     root=Path(__file__).resolve().parents[1]
     md=Path(a.microdos); b=Path(a.blitz86)
     sys_src=md/'src/system/md_dos2_system.c'
@@ -132,13 +139,13 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
     BLITZBUS_LCD_CONSOLE=1
-    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD=40000000u)
+    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u)
 target_sources(blitzbus_pico_b86_dos PRIVATE
     "{(root/'src/bb_lcd_console.c').as_posix()}"
     "${{MD_ROOT}}/blitzbus-overlay/mr_pico_ili9341.c"
     "${{MD_ROOT}}/blitzbus-overlay/gfx_font5x7.c")
 target_include_directories(blitzbus_pico_b86_dos PRIVATE "${{MD_ROOT}}/blitzbus-overlay")
-target_link_libraries(blitzbus_pico_b86_dos PRIVATE hardware_spi hardware_dma pico_multicore)
+target_link_libraries(blitzbus_pico_b86_dos PRIVATE hardware_spi hardware_dma hardware_clocks pico_multicore)
 pico_set_program_name(blitzbus_pico_b86_dos "blitzBUS DOS + blitz86 gated")
 {END}'''
     if BEGIN in cm or END in cm:
