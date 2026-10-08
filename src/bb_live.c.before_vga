@@ -15,11 +15,6 @@
  *    dispatch limit bounds each slice.
  */
 #include "bb_live.h"
-#include "bb_vga.h"
-#include "bb_vga.c"
-#if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-#include "bb_lcd_console.h"
-#endif
 #include "b86.h"
 #include "msdos2_boot.h"
 #include <string.h>
@@ -224,18 +219,6 @@ B86_HOT static void sync_pages(void)
 
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
-    if (v == 0x10u) {
-        uint16_t ax=(uint16_t)c->r[B86_AX], bx=(uint16_t)c->r[B86_BX];
-        uint16_t cx=(uint16_t)c->r[B86_CX], dx=(uint16_t)c->r[B86_DX];
-        uint16_t f=b86_get_flags(c);
-        if (bb_vga_int10(&ax,&bx,&cx,&dx,&f)) {
-            c->r[B86_AX]=ax; c->r[B86_BX]=bx;
-            c->r[B86_CX]=cx; c->r[B86_DX]=dx;
-            b86_set_flags(c,f);
-            ++st.hook_calls;
-            return 1;
-        }
-    }
 #ifdef BB_DEBUG
     fprintf(stderr, "[bb]   int %02X at %04X:%04X\n", v, (unsigned)c->seg[B86_CS], (unsigned)c->ip);
 #endif
@@ -250,22 +233,11 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 }
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
-    uint8_t result;
-#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
-    if (bb_vga_port_in(port,&result,time_us_64())) return result;
-#else
-    if (bb_vga_port_in(port,&result,0)) return result;
-#endif
     (void)c;
     return R->hooks.in8 ? R->hooks.in8(R, port, R->hooks.user) : 0xFFu;
 }
 B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 {
-#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
-    if (bb_vga_port_out(port,v,time_us_64())) return;
-#else
-    if (bb_vga_port_out(port,v,0)) return;
-#endif
     (void)c;
     if (R->hooks.out8) R->hooks.out8(R, port, v, R->hooks.user);
 }
@@ -276,7 +248,6 @@ static int start(MdRuntime *rt)
     if (rt->hooks.interrupt != md_msdos2_boot_interrupt || rt->hooks.user == NULL) { failed = 1; fail_reason = "not-msdos2-boot"; return 0; }
     if (((uintptr_t)rt->cpu.memory & 63u) != 0) { failed = 1; fail_reason = "guest-not-64-aligned"; return 0; }
     bios_seg = ((const MdMsdos2Boot *)rt->hooks.user)->bios_segment;
-    bb_vga_init(rt->cpu.memory);
     b86_init(&C, rt->cpu.memory);      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
     C.int_hook = hook_int;
     C.code_hook = code_hook;
@@ -332,9 +303,6 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     to_md();
 #ifdef BB_DEBUG
     fprintf(stderr, "[bb]   rc=%d exit %04X:%04X retired=%u\n", rc, rt->cpu.cs, rt->cpu.ip, C.icnt);
-#endif
-#if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-    bb_lcd_vga_tick();
 #endif
     rt->instructions += C.icnt;
     st.retired += C.icnt;

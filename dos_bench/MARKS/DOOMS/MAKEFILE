@@ -1,0 +1,22 @@
+ifeq ($(WATCOM),)
+$(error Please set WATCOM to point to your OpenWatcom V2.0 installation)
+endif
+
+CFLAGS := -O2 -s -I$(WATCOM)/h -std=c99 -march=i86 -fno-stack-check -fm
+TARGETS := doomfps1.exe doomfps2.com
+
+all: doomfps1.exe doomfps2.com
+
+%.exe: %.c
+	owcc -o $@ $< -bdos $(CFLAGS)
+
+%.com: %.c
+	owcc -o $@ $< -bcom $(CFLAGS)
+
+clean:
+	$(RM) *.o *.map *.sym
+
+distclean: clean
+	$(RM) $(TARGETS)
+
+.PHONY: all clean distclean

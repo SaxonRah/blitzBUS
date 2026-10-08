@@ -3,7 +3,6 @@
  * COM remains the input and debug transport; framebuffer is only a mirror.
  */
 #include "bb_lcd_console.h"
-#include "bb_vga.h"
 #include "mr_pico_ili9341.h"
 #include "gfx_font5x7.h"
 #include "pico/stdlib.h"
@@ -96,46 +95,4 @@ void bb_lcd_console_flush(void){
     for(unsigned r=0;r<ROWS;r++)if(dirty[r]){draw_row(r);dirty[r]=0;}
     uint32_t ms=to_ms_since_boot(get_absolute_time());
     if((int32_t)(ms-next_status_ms)>=0){status_update();next_status_ms=ms+1000u;}
-}
-
-/* VGA mode 13h: 320x200 -> 480x300 (integer 3:2) centered vertically.
- * Send one 480x3 stripe per iteration to bound DOS scheduling latency.
- * LCD normally uses 480x320. Remaining 10 rows at top/bottom are black.
- */
-static uint16_t bb_vga_rgb565_strip[480u*3u];
-static unsigned bb_vga_strip_y;
-static uint32_t bb_vga_next_ms;
-static int bb_vga_was_active;
-void bb_lcd_vga_tick(void) {
-    uint32_t now;
-    const uint8_t *fb;
-    const uint16_t *pal;
-    unsigned sy,dy,x;
-    if (!active) return;
-    if (!bb_vga_active()) {
-        if(bb_vga_was_active) {
-            bb_vga_was_active=0;
-            memset(dirty,1,sizeof dirty);
-            next_status_ms=0;
-            bb_lcd_console_flush();
-        }
-        return;
-    }
-    bb_vga_was_active=1;
-    now=to_ms_since_boot(get_absolute_time());
-    if ((int32_t)(now-bb_vga_next_ms)<0) return;
-    bb_vga_next_ms=now+1u;
-    fb=bb_vga_framebuffer();pal=bb_vga_palette565();
-    if(!fb||!pal)return;
-    sy=bb_vga_strip_y*2u;
-    for(dy=0;dy<3u;dy++) {
-        unsigned src_y=(sy + (dy==2u?1u:0u));
-        if(src_y>=200u)src_y=199u;
-        for(x=0;x<480u;x++) {
-            unsigned src_x=x*2u/3u;
-            bb_vga_rgb565_strip[dy*480u+x]=pal[fb[src_y*320u+src_x]];
-        }
-    }
-    mr_pico_ili9341_flush(NULL,0,(int)(10u+bb_vga_strip_y*3u),480,3,bb_vga_rgb565_strip,&lcd);
-    bb_vga_strip_y=(bb_vga_strip_y+1u)%100u;
 }
