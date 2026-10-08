@@ -1,0 +1,6 @@
+logs/
+backups/
+build/
+*.uf2
+*.elf
+__pycache__/
