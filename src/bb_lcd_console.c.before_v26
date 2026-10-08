@@ -7,7 +7,6 @@
 #include "mr_pico_ili9341.h"
 #include "gfx_font5x7.h"
 #include "pico/stdlib.h"
-#include "pico/multicore.h"
 #include <stdio.h>
 #include <string.h>
 #define COLS 80u
@@ -99,104 +98,44 @@ void bb_lcd_console_flush(void){
     if((int32_t)(ms-next_status_ms)>=0){status_update();next_status_ms=ms+1000u;}
 }
 
-/* v27: MicroRender's DMA presenter on core 1.
- * Core 0 NEVER converts or transfers video while VGA mode 13h is active.
- * Only the presenter core owns the LCD SPI peripheral during VGA.
- * DMA sends tile A while core 1 converts tile B.  After DMA completes,
- * the buffers swap; neither buffer is modified while owned by DMA.
- * Guest VGA memory may change during presentation (ordinary VGA tearing).
+/* VGA mode 13h: 320x200 -> 480x300 (integer 3:2) centered vertically.
+ * Send one 480x3 stripe per iteration to bound DOS scheduling latency.
+ * LCD normally uses 480x320. Remaining 10 rows at top/bottom are black.
  */
-#define BB_V27_W 480u
-#define BB_V27_H 300u
-#define BB_V27_TILE_H 12u
-#define BB_V27_TILES (BB_V27_H / BB_V27_TILE_H)
-static uint16_t bb_v27_tiles[2][BB_V27_W * BB_V27_TILE_H];
-static volatile uint32_t bb_v27_request;
-static volatile uint32_t bb_v27_busy;
-static volatile uint32_t bb_v27_parked;
-static uint32_t bb_v27_started;
-static uint8_t bb_v27_was_vga;
-static volatile uint32_t bb_v27_frames;
-static volatile uint32_t bb_v27_strips;
-
-/* Exact nearest-neighbour 320 -> 480, with rows 0,0,1 for 2 -> 3. */
-static void bb_v27_convert(unsigned top, uint16_t *dst) {
-    const uint8_t *fb = bb_vga_framebuffer();
-    const uint16_t *pal = bb_vga_palette565();
-    if (!fb || !pal) { memset(dst,0,BB_V27_W*BB_V27_TILE_H*2u); return; }
-    for (unsigned y=0; y<BB_V27_TILE_H; ++y) {
-        const unsigned out_y=top+y;
-        const unsigned src_y=(out_y/3u)*2u+((out_y%3u)==2u);
-        const uint8_t *src=fb+src_y*320u;
-        uint16_t *out=dst+y*BB_V27_W;
-        for (unsigned x=0; x<320u; x+=2u) {
-            uint16_t a=pal[src[x]], b=pal[src[x+1u]];
-            *out++=a; *out++=a; *out++=b;
-        }
-    }
-}
-
-static void bb_v27_presenter(void) {
-    for (;;) {
-        if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE)) {
-            __atomic_store_n(&bb_v27_parked,1u,__ATOMIC_RELEASE);
-            sleep_us(1000u);
-            continue;
-        }
-        __atomic_store_n(&bb_v27_parked,0u,__ATOMIC_RELEASE);
-        __atomic_store_n(&bb_v27_busy,1u,__ATOMIC_RELEASE);
-        if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE)) {
-            __atomic_store_n(&bb_v27_busy,0u,__ATOMIC_RELEASE);
-            continue;
-        }
-        unsigned current=0u;
-        bb_v27_convert(0u,bb_v27_tiles[current]);
-        mr_pico_ili9341_flush_begin(NULL,0,10,BB_V27_W,BB_V27_TILE_H,
-                                     bb_v27_tiles[current],&lcd);
-        for (unsigned i=1u;i<BB_V27_TILES;i++) {
-            const unsigned next=current^1u;
-            /* Convert next strip while SPI DMA transfers current strip. */
-            bb_v27_convert(i*BB_V27_TILE_H,bb_v27_tiles[next]);
-            mr_pico_ili9341_flush_wait(NULL,&lcd);
-            __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
-            if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE))
-                goto stop_presenting;
-            mr_pico_ili9341_flush_begin(NULL,0,(int)(10u+i*BB_V27_TILE_H),
-                                        BB_V27_W,BB_V27_TILE_H,
-                                        bb_v27_tiles[next],&lcd);
-            current=next;
-        }
-        mr_pico_ili9341_flush_wait(NULL,&lcd);
-        __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
-        __atomic_add_fetch(&bb_v27_frames,1u,__ATOMIC_RELAXED);
-stop_presenting:
-        /* On return to text mode, release LCD ownership before core 0
-           redraws the DOS console.  Never leave DMA in flight. */
-        mr_pico_ili9341_flush_wait(NULL,&lcd);
-        __atomic_store_n(&bb_v27_busy,0u,__ATOMIC_RELEASE);
-    }
-}
-
+static uint16_t bb_vga_rgb565_strip[480u*3u];
+static unsigned bb_vga_strip_y;
+static uint32_t bb_vga_next_ms;
+static int bb_vga_was_active;
 void bb_lcd_vga_tick(void) {
+    uint32_t now;
+    const uint8_t *fb;
+    const uint16_t *pal;
+    unsigned sy,dy,x;
     if (!active) return;
-    if (bb_vga_active()) {
-        if (!bb_v27_started) {
-            bb_v27_started=1u;
-            multicore_launch_core1(bb_v27_presenter);
+    if (!bb_vga_active()) {
+        if(bb_vga_was_active) {
+            bb_vga_was_active=0;
+            memset(dirty,1,sizeof dirty);
+            next_status_ms=0;
+            bb_lcd_console_flush();
         }
-        bb_v27_was_vga=1u;
-        __atomic_store_n(&bb_v27_request,1u,__ATOMIC_RELEASE);
         return;
     }
-    __atomic_store_n(&bb_v27_request,0u,__ATOMIC_RELEASE);
-    if (bb_v27_was_vga) {
-        /* Rare mode transition: wait only for the in-flight DMA transfer,
-           not a full screen. This path never executes during VGA. */
-        while (!__atomic_load_n(&bb_v27_parked,__ATOMIC_ACQUIRE))
-            tight_loop_contents();
-        bb_v27_was_vga=0u;
-        memset(dirty,1,sizeof dirty);
-        next_status_ms=0;
-        bb_lcd_console_flush();
+    bb_vga_was_active=1;
+    now=to_ms_since_boot(get_absolute_time());
+    if ((int32_t)(now-bb_vga_next_ms)<0) return;
+    bb_vga_next_ms=now+1u;
+    fb=bb_vga_framebuffer();pal=bb_vga_palette565();
+    if(!fb||!pal)return;
+    sy=bb_vga_strip_y*2u;
+    for(dy=0;dy<3u;dy++) {
+        unsigned src_y=(sy + (dy==2u?1u:0u));
+        if(src_y>=200u)src_y=199u;
+        for(x=0;x<480u;x++) {
+            unsigned src_x=x*2u/3u;
+            bb_vga_rgb565_strip[dy*480u+x]=pal[fb[src_y*320u+src_x]];
+        }
     }
+    mr_pico_ili9341_flush(NULL,0,(int)(10u+bb_vga_strip_y*3u),480,3,bb_vga_rgb565_strip,&lcd);
+    bb_vga_strip_y=(bb_vga_strip_y+1u)%100u;
 }

@@ -512,10 +512,6 @@ static uint64_t bb_v24_start_us,bb_v24_jit_us,bb_v24_lcd_us,bb_v24_hash_us;
 static uint64_t bb_v24_jit_calls,bb_v24_zero,bb_v24_zero_trap,bb_v24_jit_insns;
 static uint64_t bb_v24_lcd_calls,bb_v24_hash_calls,bb_v24_interp_us;
 static uint32_t bb_v24_start_bda_tick,bb_v24_last_bda_tick;
-static uint64_t bb_v25_last_lcd_us;
-static uint64_t bb_v25_lcd_skipped;
-static uint32_t bb_v25_timer_updates;
-
 static void bb_v24_report(void) {
     if(!R||!bb_video_seen)return;
     uint64_t elapsed=bb_now_us()-bb_v24_start_us;
@@ -528,10 +524,6 @@ static void bb_v24_report(void) {
        (unsigned long long)(bb_v24_lcd_us/1000u),(unsigned long long)bb_v24_hash_calls,
        (unsigned long long)(bb_v24_hash_us/1000u),(unsigned long)bb_v24_start_bda_tick,
        (unsigned long)bb_v24_last_bda_tick);
-    printf("[bb-v25] RECOVERY lcd-skipped=%llu lcd-calls=%llu timer-updates=%lu hz=18.2065 refresh-cap=60 hash-disabled=1\n",
-       (unsigned long long)bb_v25_lcd_skipped,
-       (unsigned long long)bb_v24_lcd_calls,
-       (unsigned long)bb_v25_timer_updates);
 }
 static uint32_t bb_v24_bda_tick(void) {
     if(!R)return 0;
@@ -540,25 +532,6 @@ static uint32_t bb_v24_bda_tick(void) {
            ((uint32_t)m[0x46e]<<16) | ((uint32_t)m[0x46f]<<24);
 }
 
-/* v25: real-time BIOS tick maintenance and LCD refresh pacing. */
-static void bb_v25_bios_time(void) {
-    if (!R || !bb_video_seen || !bb_v24_start_us) return;
-    /* 18.2065Hz BIOS tick from monotonic host time, independent of guest
-       execution throughput. 54925 microseconds is the rounded PC tick. */
-    uint64_t elapsed = bb_now_us() - bb_v24_start_us;
-    uint32_t ticks = (uint32_t)(elapsed / 54925ull);
-    if (ticks >= 0x1800b0u) ticks %= 0x1800b0u;
-    uint8_t *m = R->cpu.memory;
-    uint32_t old = (uint32_t)m[0x46cu] | ((uint32_t)m[0x46du]<<8) |
-                   ((uint32_t)m[0x46eu]<<16) | ((uint32_t)m[0x46fu]<<24);
-    if (ticks != old) {
-        m[0x46cu]=(uint8_t)ticks;
-        m[0x46du]=(uint8_t)(ticks>>8);
-        m[0x46eu]=(uint8_t)(ticks>>16);
-        m[0x46fu]=(uint8_t)(ticks>>24);
-        ++bb_v25_timer_updates;
-    }
-}
 static uint8_t bb_v23_have_hash;
 static uint8_t bb_v23_scan(unsigned c) {
     static const char letters[]="abcdefghijklmnopqrstuvwxyz";
@@ -597,8 +570,22 @@ static void bb_v23_poll_input(void) {
 #endif
 }
 static void bb_v23_graphics_sample(void) {
-    /* v25: intentionally no full-frame/stride framebuffer hashing. */
+    if(!bb_video_seen||!R)return;
+    /* Sample 320x200 aperture. This measures changed content at sampling
+       points, NOT total guest writes or physical LCD DMA flush count. */
+    uint64_t v24_hash_t0=bb_now_us();
+    const uint8_t *fb=R->cpu.memory+0xa0000u;
+    uint32_t hash=2166136261u;
+    for(unsigned i=0;i<64000u;i+=64u){hash=(hash^fb[i])*16777619u;}
+    if(bb_v23_have_hash&&hash!=bb_v23_last_hash)++bb_v23_changed_samples;
+    bb_v23_last_hash=hash;bb_v23_have_hash=1;
+    bb_v24_hash_us+=bb_now_us()-v24_hash_t0;
+    ++bb_v24_hash_calls;
     ++bb_v23_lcd_ticks;
+    if(0)
+       printf("[bb-v23] GRAPHICS lcd-ticks=%lu changed-samples=%lu hash=%08lX key-polls=%lu keys=%lu int16=%u\n",
+       (unsigned long)bb_v23_lcd_ticks,(unsigned long)bb_v23_changed_samples,(unsigned long)hash,
+       (unsigned long)bb_v23_polls,(unsigned long)bb_v23_keys,bb_v22_key_calls);
 }
 static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
                             uint16_t *ip, uint8_t *rewind)
@@ -814,7 +801,6 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (R == NULL && !start(rt)) return 0;
     /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
     bb_v23_poll_input();
-    bb_v25_bios_time();
     if (rt != R || rt->cpu.cs == bios_seg) {
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
@@ -873,7 +859,6 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     bb_v24_jit_us+=bb_now_us()-v24_jit_t0;
     ++bb_v24_jit_calls;
     bb_v24_jit_insns+=C.icnt;
-    bb_v25_bios_time();
     if(C.icnt==0u){++bb_v24_zero;if(rc==B86_TRAP)++bb_v24_zero_trap;}
     if(bb_video_seen && bb_v24_jit_calls>0 && (bb_v24_jit_calls%8192u)==0u){
         bb_v24_last_bda_tick=bb_v24_bda_tick();
@@ -926,15 +911,11 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     fprintf(stderr, "[bb]   rc=%d exit %04X:%04X retired=%u\n", rc, rt->cpu.cs, rt->cpu.ip, C.icnt);
 #endif
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-    /* Cooperative VGA presentation: one 12-row tile per eligible dispatch.
-       Each call returns quickly so DOS execution and USB keyboard service continue.
-       The LCD presenter maintains its own 1 ms strip cadence. */
-    if (bb_video_seen) {
-        uint64_t t=bb_now_us();
-        bb_lcd_vga_tick();
-        bb_v24_lcd_us+=bb_now_us()-t;
-        ++bb_v24_lcd_calls;
-    }
+    bb_v23_graphics_sample();
+    uint64_t v24_lcd_t0=bb_now_us();
+    bb_lcd_vga_tick();
+    bb_v24_lcd_us+=bb_now_us()-v24_lcd_t0;
+    ++bb_v24_lcd_calls;
 #endif
     rt->instructions += C.icnt;
     st.retired += C.icnt;

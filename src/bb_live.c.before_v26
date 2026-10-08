@@ -926,14 +926,18 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     fprintf(stderr, "[bb]   rc=%d exit %04X:%04X retired=%u\n", rc, rt->cpu.cs, rt->cpu.ip, C.icnt);
 #endif
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-    /* Cooperative VGA presentation: one 12-row tile per eligible dispatch.
-       Each call returns quickly so DOS execution and USB keyboard service continue.
-       The LCD presenter maintains its own 1 ms strip cadence. */
+    /* Cap presentation at 60 Hz instead of touching the LCD each JIT slice.
+       Keep guest execution uncapped. The VGA tick retains its own dirty logic. */
     if (bb_video_seen) {
-        uint64_t t=bb_now_us();
-        bb_lcd_vga_tick();
-        bb_v24_lcd_us+=bb_now_us()-t;
-        ++bb_v24_lcd_calls;
+        uint64_t now=bb_now_us();
+        if (!bb_v25_last_lcd_us || now-bb_v25_last_lcd_us >= 16667ull) {
+            bb_v25_last_lcd_us=now;
+            bb_v23_graphics_sample();
+            uint64_t t=bb_now_us();
+            bb_lcd_vga_tick();
+            bb_v24_lcd_us+=bb_now_us()-t;
+            ++bb_v24_lcd_calls;
+        } else ++bb_v25_lcd_skipped;
     }
 #endif
     rt->instructions += C.icnt;

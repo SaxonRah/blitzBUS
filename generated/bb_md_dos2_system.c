@@ -1,4 +1,10 @@
 #include "bb_live.h"
+extern void bb_live_trace_interpreter(MdRuntime *, const char *, uint64_t);
+extern void bb_live_v7_after_interpreter(MdRuntime *, const char *, uint64_t);
+extern void bb_live_v17_interp_begin(MdRuntime *);
+extern int bb_live_v21_enabled(const MdRuntime *);
+extern void bb_live_v21_before_step(const MdRuntime *);
+extern int bb_live_v21_after_step(MdRuntime *);
 #include "md_dos2_system.h"
 
 #ifdef MICRODOS_ENABLE_NATIVE3
@@ -381,7 +387,21 @@ MdStopReason MD_EXEC_HOT_FUNC(md_dos2_system_run)(MdDos2System *sys, uint64_t bu
                zero-progress sites and repeatedly polluted the 24 KiB arena.
                Keep it on the canonical threaded path until its CS changes. */
             const uint64_t before = rt->instructions;
+            bb_live_v17_interp_begin(rt);
+            bb_live_trace_interpreter(rt, "interp-before", before);
+            if (bb_live_v21_enabled(rt)) {
+                const uint16_t trace_cs=rt->cpu.cs;
+                while (rt->stop_reason == MD_STOP_NONE &&
+                       rt->instructions - before < left) {
+                    bb_live_v21_before_step(rt);
+                    (void)md_interp_step(rt);
+                    if (bb_live_v21_after_step(rt)) break;
+                    if (rt->cpu.cs != trace_cs) break;
+                }
+            } else {
             (void)md_interp_run_until_cs_change(rt, left);
+            }            bb_live_trace_interpreter(rt, "interp-after", before);
+            bb_live_v7_after_interpreter(rt, "interp-exit", before);
             md_exec_router_record(&sys->router, MD_EXEC_TIER_INTERP, rt->instructions - before);
             sys->bios_interpreted_instructions += rt->instructions - before;
             sys->jit->bios_bypass_instructions += rt->instructions - before;
@@ -444,7 +464,21 @@ MdStopReason MD_EXEC_HOT_FUNC(md_dos2_system_run)(MdDos2System *sys, uint64_t bu
         {
             const uint64_t before = rt->instructions;
             const int was_bios = rt->cpu.cs == sys->boot.bios_segment;
+            bb_live_v17_interp_begin(rt);
+            bb_live_trace_interpreter(rt, "interp-before", before);
+            if (bb_live_v21_enabled(rt)) {
+                const uint16_t trace_cs=rt->cpu.cs;
+                while (rt->stop_reason == MD_STOP_NONE &&
+                       rt->instructions - before < left) {
+                    bb_live_v21_before_step(rt);
+                    (void)md_interp_step(rt);
+                    if (bb_live_v21_after_step(rt)) break;
+                    if (rt->cpu.cs != trace_cs) break;
+                }
+            } else {
             (void)md_interp_run_until_cs_change(rt, left);
+            }            bb_live_trace_interpreter(rt, "interp-after", before);
+            bb_live_v7_after_interpreter(rt, "interp-exit", before);
             md_exec_router_record(&sys->router, MD_EXEC_TIER_INTERP,
                                   rt->instructions - before);
 #ifdef MICRODOS_ENABLE_NATIVE_V2

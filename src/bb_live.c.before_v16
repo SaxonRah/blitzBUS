@@ -29,7 +29,6 @@
 #endif
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 #include "pico/time.h"
-#include "pico/stdlib.h"
 #define BB_HAVE_TIMER 1
 #endif
 
@@ -267,8 +266,6 @@ static void bb_cpu_snapshot(const char *tag, const B86Cpu *c, int rc, uint32_t i
 void bb_live_trace_interpreter(MdRuntime *rt, const char *phase, uint64_t before) {
     static uint32_t calls;
     if (!bb_video_seen || !rt || rt!=R) return;
-    (void)phase; (void)before; (void)calls;
-    return; /* v19: first-invalid guard records each interpreter exit separately. */
     uint32_t n=++calls;
     uint32_t pc=bb_v6_linear(rt->cpu.cs,rt->cpu.ip);
     /* Always report the first handoffs, HMA, or out-of-guest transitions;
@@ -335,145 +332,30 @@ static int bb_v7_check(MdRuntime *rt,const char *origin) {
     return 0;
 }
 
-/* v17: first observable suspicious *execution boundary*, not a decoded
- * instruction. IVT bytes are data, and a zero-only code window may be valid,
- * so this is an intentionally strict diagnostic stop, not a production rule. */
-static void bb_live_v21_dump(const MdRuntime *rt);
-static int bb_v17_stopped;
-static int bb_v17_guard(MdRuntime *rt, const char *origin,
-                         uint16_t from_cs, uint16_t from_ip,
-                         uint16_t from_ss, uint16_t from_sp,
-                         uint32_t retired, int rc)
-{
-    if (!bb_video_seen || bb_v17_stopped || !rt || rt != R ||
-        rt->stop_reason != MD_STOP_NONE) return 0;
-    uint32_t pc=bb_v6_linear(rt->cpu.cs,rt->cpu.ip);
-    int ivt=(pc < 0x400u);
-    int zero=0;
-    if (!ivt && ((pc>=0x500u && pc<0x8000u) || pc>=0x100000u)) {
-        zero=1;
-        for (unsigned j=0;j<8u;j++) if (bb_v6_byte(pc+j)) {zero=0;break;}
-    }
-    if (!ivt && !zero) return 0;
-    bb_v17_stopped=1;
-    bb_live_v21_dump(rt);
-    printf("[bb-v17] FIRST-INVALID kind=%s origin=%s from=%04X:%04X ss:sp=%04X:%04X to=%04X:%04X physical=%05lX retired=%lu rc=%d\n",
-           ivt?"IVT-EXEC":"ZERO-CODE",origin,from_cs,from_ip,from_ss,from_sp,
-           rt->cpu.cs,rt->cpu.ip,(unsigned long)pc,(unsigned long)retired,rc);
-    printf("[bb-v17] SOURCE code=");
-    uint32_t source=bb_v6_linear(from_cs,from_ip);
-    for(unsigned j=0;j<24u;j++)printf("%02X",bb_v6_byte(source+j));
-    printf(" stack=");
-    uint32_t stack=bb_v6_linear(from_ss,from_sp);
-    for(unsigned j=0;j<24u;j++)printf("%02X",bb_v6_byte(stack+j));
-    printf("\n[bb-v17] TARGET code=");
-    for(unsigned j=0;j<24u;j++)printf("%02X",bb_v6_byte(pc+j));
-    printf(" stack=");stack=bb_v6_linear(rt->cpu.ss,rt->cpu.r[4]);
-    for(unsigned j=0;j<24u;j++)printf("%02X",bb_v6_byte(stack+j));
-    printf("\n");
-    bb_v7_dump("v17-first-invalid");
-    rt->fault_linear=pc;
-    rt->fault_opcode=bb_v6_byte(pc);
-    rt->stop_reason=MD_STOP_FAULT;
-    printf("[bb-v17] STOP diagnostic=1 reason=first-invalid-boundary NOTE=origin-instruction-not-yet-proven\n");
+/* v14: only the first interpreter fallback at 5152:004F. No guest mutation. */
+static unsigned bb_v14_trace_taken;
+int bb_live_v14_arm(const MdRuntime *rt) {
+    if (bb_v14_trace_taken || !bb_video_seen || !rt || rt != R) return 0;
+    if (rt->cpu.cs != 0x5152u || rt->cpu.ip != 0x004Fu) return 0;
+    bb_v14_trace_taken=1;
+    printf("[bb-v14] TRACE-ARM cs:ip=5152:004F max=64 boundary=CS-change\n");
     fflush(stdout);
     return 1;
 }
-/* v21: continuous, bounded last-128 interpreter instruction history.
- * Each record is BEFORE its instruction; both source bytes and stack contents
- * are saved at execution time, not reconstructed from modified guest RAM. */
-#define BB_V21_HISTORY 128u
-typedef struct {
-    uint16_t cs,ip,ss,sp,ax,bx,cx,dx,si,di,bp,ds,es,flags;
-    uint8_t code[8],stack[12];
-} BbV21Step;
-static BbV21Step bb_v21_steps[BB_V21_HISTORY];
-static uint32_t bb_v21_next,bb_v21_count;
-static int bb_v21_active,bb_v21_dumped;
-int bb_live_v21_enabled(const MdRuntime *rt) {
-    if (!bb_video_seen || !rt || rt != R || bb_v17_stopped) return 0;
-    return 0; /* v23: disable instruction-by-instruction diagnostic overhead */
-    if (!bb_v21_active) {
-        bb_v21_active=1;
-        printf("[bb-v21] ROLLING-TRACE active=1 history=128 mode=interpreter-only\n");
-        fflush(stdout);
-    }
-    return 1;
-}
-void bb_live_v21_before_step(const MdRuntime *rt) {
-    if (!bb_v21_active || !rt || rt!=R || bb_v17_stopped) return;
-    MdX86 *c=(MdX86 *)&rt->cpu;
-    BbV21Step *h=&bb_v21_steps[bb_v21_next % BB_V21_HISTORY];
-    h->cs=c->cs;h->ip=c->ip;h->ss=c->ss;h->sp=c->r[4];
-    h->ax=c->r[0];h->bx=c->r[3];h->cx=c->r[1];h->dx=c->r[2];
-    h->si=c->r[6];h->di=c->r[7];h->bp=c->r[5];
-    h->ds=c->ds;h->es=c->es;h->flags=md_x86_flags(c);
-    uint32_t pc=bb_v6_linear(h->cs,h->ip),sp=bb_v6_linear(h->ss,h->sp);
-    for(unsigned j=0;j<8u;j++)h->code[j]=bb_v6_byte(pc+j);
-    for(unsigned j=0;j<12u;j++)h->stack[j]=bb_v6_byte(sp+j);
-    ++bb_v21_next;if(bb_v21_count<BB_V21_HISTORY)++bb_v21_count;
-}
-static void bb_live_v21_dump(const MdRuntime *rt) {
-    if (bb_v21_dumped) return;
-    bb_v21_dumped=1;
-    printf("[bb-v21] HISTORY count=%lu saved-before-instruction chronological=1\n",(unsigned long)bb_v21_count);
-    uint32_t first=bb_v21_next-bb_v21_count;
-    for(uint32_t i=0;i<bb_v21_count;i++) {
-        BbV21Step *h=&bb_v21_steps[(first+i)%BB_V21_HISTORY];
-        printf("[bb-v21] STEP age=%ld cs:ip=%04X:%04X ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X ds=%04X es=%04X ss:sp=%04X:%04X flags=%04X code=",
-          (long)i-(long)bb_v21_count,h->cs,h->ip,h->ax,h->bx,h->cx,h->dx,h->si,h->di,h->bp,h->ds,h->es,h->ss,h->sp,h->flags);
-        for(unsigned j=0;j<8;j++)printf("%02X",h->code[j]);
-        printf(" stack=");for(unsigned j=0;j<12;j++)printf("%02X",h->stack[j]);printf("\n");
-    }
-    if(rt) {
-        printf("[bb-v21] DEST cs:ip=%04X:%04X ss:sp=%04X:%04X flags=%04X\n",
-          rt->cpu.cs,rt->cpu.ip,rt->cpu.ss,rt->cpu.r[4],md_x86_flags((MdX86*)&rt->cpu));
-    }
-    printf("[bb-v21] IVT-0 0000:0000=");
-    for(unsigned j=0;j<16;j++)printf("%02X",bb_v6_byte(j));
-    printf(" IVT-10 0000:0040=");
-    for(unsigned j=0;j<16;j++)printf("%02X",bb_v6_byte(0x40u+j));
-    printf(" IVT-16 0000:0058=");
-    for(unsigned j=0;j<16;j++)printf("%02X",bb_v6_byte(0x58u+j));
+void bb_live_v14_step(const MdRuntime *rt, unsigned index, const char *when) {
+    if (!rt || !R) return;
+    const MdX86 *c=&rt->cpu;
+    const uint32_t pc=bb_v6_linear(c->cs,c->ip),stk=bb_v6_linear(c->ss,c->r[4]);
+    printf("[bb-v14] %s n=%02u cs:ip=%04X:%04X linear=%05lX ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X ss:sp=%04X:%04X ds=%04X es=%04X flags=%04X stop=%d code=",
+        when,index,c->cs,c->ip,(unsigned long)pc,c->r[0],c->r[3],c->r[1],c->r[2],c->r[6],c->r[7],c->r[5],c->ss,c->r[4],c->ds,c->es,md_x86_flags(c),(int)rt->stop_reason);
+    for(unsigned j=0;j<12;j++)printf("%02X",bb_v6_byte(pc+j));
+    printf(" stack=");for(unsigned j=0;j<16;j++)printf("%02X",bb_v6_byte(stk+j));
     printf("\n");fflush(stdout);
 }
-int bb_live_v21_after_step(MdRuntime *rt) {
-    if (!bb_v21_active || !rt || rt!=R || bb_v17_stopped) return 0;
-    uint16_t cs=0,ip=0,ss=0,sp=0;
-    if(bb_v21_count) {
-        const BbV21Step *h=&bb_v21_steps[(bb_v21_next-1u)%BB_V21_HISTORY];
-        cs=h->cs;ip=h->ip;ss=h->ss;sp=h->sp;
-    }
-    return bb_v17_guard(rt,"interp-step",cs,ip,ss,sp,1u,0);
-}
 
-static uint64_t bb_v24_interp_calls;
-static uint64_t bb_v24_interp_insns;
-static uint16_t bb_v17_interp_cs,bb_v17_interp_ip,bb_v17_interp_ss,bb_v17_interp_sp;
-void bb_live_v17_interp_begin(MdRuntime *rt) {
-    if (!rt) return;
-    bb_v17_interp_cs=rt->cpu.cs;bb_v17_interp_ip=rt->cpu.ip;
-    bb_v17_interp_ss=rt->cpu.ss;bb_v17_interp_sp=rt->cpu.r[4];
-}
 void bb_live_v7_after_interpreter(MdRuntime *rt,const char *origin,uint64_t before) {
     if(!bb_video_seen||!rt||rt!=R)return;
-    static uint32_t v19_interpreter_exits;
-    ++v19_interpreter_exits;
-    ++bb_v24_interp_calls;
-    bb_v24_interp_insns += rt->instructions-before;
-    /* This callback observes completed interpreter slices; its wall-time is
-       accounted separately by the guest loop, not measurable here. */
-
-    if (0) {
-        printf("[bb-v19] INTERP-PROGRESS exit=%lu retired=%lu cs:ip=%04X:%04X ss:sp=%04X:%04X\n",
-            (unsigned long)v19_interpreter_exits,(unsigned long)(rt->instructions-before),
-            rt->cpu.cs,rt->cpu.ip,rt->cpu.ss,rt->cpu.r[4]);
-        fflush(stdout);
-    }
     bb_v7_record(4,rt->cpu.cs,rt->cpu.ip,rt->cpu.ss,rt->cpu.r[4],rt->cpu.r[0],rt->cpu.ds,rt->cpu.es,md_x86_flags(&rt->cpu),(uint32_t)(rt->instructions-before));
-    if (bb_v17_guard(rt,origin,bb_v17_interp_cs,bb_v17_interp_ip,
-                     bb_v17_interp_ss,bb_v17_interp_sp,
-                     (uint32_t)(rt->instructions-before),0)) return;
     (void)bb_v7_check(rt,origin);
 }
 
@@ -484,168 +366,8 @@ static void bb_trace_port(uint16_t port, uint8_t result, uint32_t n) {
         fflush(stdout);
     }
 }
-/* v22: BIOS keyboard services, shared between native and interpreter.
- * Queue uses conventional PC BIOS Data Area 0040:001A/001C and 001E..003D.
- * No synthetic keypresses. No-key AH=00 retries the INT later.
- * A platform keyboard producer may append BIOS AX words to that BDA ring.
- */
-static unsigned bb_v22_key_calls;
-static uint16_t bb_v22_word(const uint8_t *m, unsigned addr)
-{ return (uint16_t)((unsigned)m[addr] | ((unsigned)m[addr+1u]<<8)); }
-static void bb_v22_write_word(uint8_t *m, unsigned addr, uint16_t w)
-{ m[addr]=(uint8_t)w; m[addr+1u]=(uint8_t)(w>>8); }
-static void bb_v22_queue_init(uint8_t *m)
-{
-    uint16_t h=bb_v22_word(m,0x41au),t=bb_v22_word(m,0x41cu);
-    if (h<0x1eu || h>=0x3eu || (h&1u) || t<0x1eu || t>=0x3eu || (t&1u)) {
-        bb_v22_write_word(m,0x41au,0x1eu);
-        bb_v22_write_word(m,0x41cu,0x1eu);
-    }
-}
-/* v23: USB CDC input -> standard BIOS keyboard ring after video starts.
- * The DOS command reader owns console input before mode 13h.
- * This is a minimal ASCII-to-set-1 mapping; extended keys need a later pass. */
-static uint32_t bb_v23_keys,bb_v23_key_drop,bb_v23_polls;
-static uint32_t bb_v23_lcd_ticks,bb_v23_changed_samples,bb_v23_last_hash;
-/* v24: additive counters; do not alter guest semantics. */
-static uint64_t bb_v24_start_us,bb_v24_jit_us,bb_v24_lcd_us,bb_v24_hash_us;
-static uint64_t bb_v24_jit_calls,bb_v24_zero,bb_v24_zero_trap,bb_v24_jit_insns;
-static uint64_t bb_v24_lcd_calls,bb_v24_hash_calls,bb_v24_interp_us;
-static uint32_t bb_v24_start_bda_tick,bb_v24_last_bda_tick;
-static uint64_t bb_v25_last_lcd_us;
-static uint64_t bb_v25_lcd_skipped;
-static uint32_t bb_v25_timer_updates;
-
-static void bb_v24_report(void) {
-    if(!R||!bb_video_seen)return;
-    uint64_t elapsed=bb_now_us()-bb_v24_start_us;
-    printf("[bb-v24] PROFILE wall-ms=%llu jit-calls=%llu jit-zero=%llu zero-trap=%llu jit-insns=%llu jit-ms=%llu interp-calls=%llu interp-insns=%llu interp-ms=%llu lcd-tick-calls=%llu lcd-tick-ms=%llu hash-calls=%llu hash-ms=%llu bda-tick-start=%lu bda-tick-now=%lu\n",
-       (unsigned long long)(elapsed/1000u),(unsigned long long)bb_v24_jit_calls,
-       (unsigned long long)bb_v24_zero,(unsigned long long)bb_v24_zero_trap,
-       (unsigned long long)bb_v24_jit_insns,(unsigned long long)(bb_v24_jit_us/1000u),
-       (unsigned long long)bb_v24_interp_calls,(unsigned long long)bb_v24_interp_insns,
-       (unsigned long long)(bb_v24_interp_us/1000u),(unsigned long long)bb_v24_lcd_calls,
-       (unsigned long long)(bb_v24_lcd_us/1000u),(unsigned long long)bb_v24_hash_calls,
-       (unsigned long long)(bb_v24_hash_us/1000u),(unsigned long)bb_v24_start_bda_tick,
-       (unsigned long)bb_v24_last_bda_tick);
-    printf("[bb-v25] RECOVERY lcd-skipped=%llu lcd-calls=%llu timer-updates=%lu hz=18.2065 refresh-cap=60 hash-disabled=1\n",
-       (unsigned long long)bb_v25_lcd_skipped,
-       (unsigned long long)bb_v24_lcd_calls,
-       (unsigned long)bb_v25_timer_updates);
-}
-static uint32_t bb_v24_bda_tick(void) {
-    if(!R)return 0;
-    const uint8_t *m=R->cpu.memory;
-    return (uint32_t)m[0x46c] | ((uint32_t)m[0x46d]<<8) |
-           ((uint32_t)m[0x46e]<<16) | ((uint32_t)m[0x46f]<<24);
-}
-
-/* v25: real-time BIOS tick maintenance and LCD refresh pacing. */
-static void bb_v25_bios_time(void) {
-    if (!R || !bb_video_seen || !bb_v24_start_us) return;
-    /* 18.2065Hz BIOS tick from monotonic host time, independent of guest
-       execution throughput. 54925 microseconds is the rounded PC tick. */
-    uint64_t elapsed = bb_now_us() - bb_v24_start_us;
-    uint32_t ticks = (uint32_t)(elapsed / 54925ull);
-    if (ticks >= 0x1800b0u) ticks %= 0x1800b0u;
-    uint8_t *m = R->cpu.memory;
-    uint32_t old = (uint32_t)m[0x46cu] | ((uint32_t)m[0x46du]<<8) |
-                   ((uint32_t)m[0x46eu]<<16) | ((uint32_t)m[0x46fu]<<24);
-    if (ticks != old) {
-        m[0x46cu]=(uint8_t)ticks;
-        m[0x46du]=(uint8_t)(ticks>>8);
-        m[0x46eu]=(uint8_t)(ticks>>16);
-        m[0x46fu]=(uint8_t)(ticks>>24);
-        ++bb_v25_timer_updates;
-    }
-}
-static uint8_t bb_v23_have_hash;
-static uint8_t bb_v23_scan(unsigned c) {
-    static const char letters[]="abcdefghijklmnopqrstuvwxyz";
-    static const uint8_t scans[]={0x1e,0x30,0x2e,0x20,0x12,0x21,0x22,0x23,0x17,0x24,0x25,0x26,0x32,0x31,0x18,0x19,0x10,0x13,0x1f,0x14,0x16,0x2f,0x11,0x2d,0x15,0x2c};
-    static const uint8_t digits[]={0x0b,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a};
-    unsigned lo=c|0x20u;
-    for(unsigned i=0;i<26;i++) if(lo==(unsigned)letters[i])return scans[i];
-    if(c>='0'&&c<='9')return digits[c-'0'];
-    if(c==13||c==10)return 0x1c;
-    if(c==27)return 0x01;
-    if(c==8||c==127)return 0x0e;
-    if(c==' ')return 0x39;
-    return 0u;
-}
-static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
-    if(c==10u)c=13u;
-    if(c==127u)c=8u;
-    if(c>127u)return;
-    bb_v22_queue_init(m);
-    uint16_t head=bb_v22_word(m,0x41au),tail=bb_v22_word(m,0x41cu);
-    uint16_t next=(uint16_t)(tail+2u);
-    if(next>=0x3eu)next=0x1eu;
-    if(next==head){++bb_v23_key_drop;return;}
-    bb_v22_write_word(m,0x400u+tail,(uint16_t)(((uint16_t)bb_v23_scan(c)<<8)|c));
-    bb_v22_write_word(m,0x41cu,next);
-    ++bb_v23_keys;
-    printf("[bb-v23] KEY ascii=%02X scan=%02X queued=%lu\n",c,bb_v23_scan(c),(unsigned long)bb_v23_keys);
-}
-static void bb_v23_poll_input(void) {
-    if(!bb_video_seen||!R)return;
-    ++bb_v23_polls;
-#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
-    /* Avoid draining multiple characters during a single guest slice. */
-    int c=getchar_timeout_us(0);
-    if(c>=0)bb_v23_enqueue_ascii(R->cpu.memory,(unsigned)c);
-#endif
-}
-static void bb_v23_graphics_sample(void) {
-    /* v25: intentionally no full-frame/stride framebuffer hashing. */
-    ++bb_v23_lcd_ticks;
-}
-static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
-                            uint16_t *ip, uint8_t *rewind)
-{
-    uint8_t ah=(uint8_t)(*ax>>8);
-    uint16_t head,tail;
-    if (ah!=0x00u && ah!=0x01u && ah!=0x02u && ah!=0x10u && ah!=0x11u && ah!=0x12u) return 0;
-    bb_v23_poll_input();
-    bb_v22_queue_init(m);
-    head=bb_v22_word(m,0x41au);tail=bb_v22_word(m,0x41cu);
-    if (ah==0x02u || ah==0x12u) {
-        *ax=(uint16_t)((*ax&0xff00u)|m[0x417u]);
-    } else if (head==tail) {
-        if (ah==0x01u || ah==0x11u) *flags |= 0x0040u; /* ZF=1, preserve AX */
-        else {
-            /* Blocking read without inventing a key.  The guest reexecutes
-             * INT 16h on the next quantum while host input may be polled. */
-            *ip=(uint16_t)(*ip-2u); *rewind=1u;
-        }
-    } else {
-        *ax=bb_v22_word(m,0x400u+head);
-        *flags &= (uint16_t)~0x0040u;
-        if (ah==0x00u || ah==0x10u) {
-            uint16_t next=(uint16_t)(head+2u);
-            bb_v22_write_word(m,0x41au,next>=0x3eu?0x1eu:next);
-        }
-    }
-    if ((++bb_v22_key_calls)<=2u) {
-        printf("[bb-v22] INT16 ah=%02X ax=%04X zf=%u head=%04X tail=%04X wait=%u\n",
-            (unsigned)ah,(unsigned)*ax,(unsigned)((*flags>>6)&1u),head,tail,(unsigned)*rewind);
-        fflush(stdout);
-    }
-    return 1;
-}
-
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
-    if (v == 0x16u) {
-        uint16_t ax=(uint16_t)c->r[B86_AX], flags=b86_get_flags(c);
-        uint16_t ip=(uint16_t)c->ip; uint8_t rewind=0;
-        if(bb_v22_keyboard(R->cpu.memory,&ax,&flags,&ip,&rewind)) {
-            c->r[B86_AX]=ax; b86_set_flags(c,flags);
-            if(rewind)c->ip=ip;
-            ++st.hook_calls;
-            return 1;
-        }
-    }
     if (v == 0x10u) {
         if (++bb_trace_ints<=24u) {
             printf("[bb-trace] INT10 enter n=%lu ax=%04X cs:ip=%04X:%04X sp=%04X\n",
@@ -660,9 +382,6 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
         if (bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f)) {
             if ((uint8_t)(ax >> 8) == 0u && (uint8_t)ax == 0x13u) {
                 bb_video_seen=1u;
-                bb_v24_start_us=bb_now_us();
-                bb_v24_start_bda_tick=bb_v24_bda_tick();
-
                 bb_handoff_n=0;
                 printf("[bb-handoff] MODE13 hook-return convention: before returning 1\n");
                 fflush(stdout);
@@ -734,16 +453,6 @@ static MdInterruptHook bb_v15_original_interrupt;
 static unsigned bb_v15_video_calls;
 static bool bb_v15_interrupt(MdRuntime *rt, uint8_t vector, void *user)
 {
-    if (vector == 0x16u) {
-        MdX86 *cpu=&rt->cpu;
-        uint16_t ax=cpu->r[0],flags=md_x86_flags(cpu),ip=cpu->ip;
-        uint8_t rewind=0;
-        if (bb_v22_keyboard(cpu->memory,&ax,&flags,&ip,&rewind)) {
-            cpu->r[0]=ax; md_x86_set_flags(cpu,flags);
-            if(rewind)cpu->ip=ip;
-            return true;
-        }
-    }
     if (vector == 0x10u) {
         MdX86 *cpu = &rt->cpu;
         uint16_t ax=cpu->r[0], bx=cpu->r[3];
@@ -791,7 +500,7 @@ static int start(MdRuntime *rt)
     if (bb_shadow) b86_jit_set_shadow(J, bb_shadow);
     bb_v15_original_interrupt = rt->hooks.interrupt;
     rt->hooks.interrupt = bb_v15_interrupt;
-    printf("[bb-v22] Shared INT10 + INT16 adapter installed original=%s\n",
+    printf("[bb-v15] INT10 shared adapter installed original=%s\n",
            bb_v15_original_interrupt == md_msdos2_boot_interrupt ? "msdos2" : "other");
     fflush(stdout);
     b86_jit_set_max_block(J, 48);
@@ -812,9 +521,6 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     (void)left;
     if (!enabled || failed || rt->stop_reason != MD_STOP_NONE) return 0;
     if (R == NULL && !start(rt)) return 0;
-    /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
-    bb_v23_poll_input();
-    bb_v25_bios_time();
     if (rt != R || rt->cpu.cs == bios_seg) {
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
@@ -838,14 +544,14 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 #endif
     uint64_t m1 = bb_xip_misses();
     ++bb_trace_runs;
-    if(0) {
+    if(bb_trace_runs<=8u || (bb_trace_runs<=65536u && (bb_trace_runs&(bb_trace_runs-1u))==0u)) {
         printf("[bb-trace] JIT enter n=%lu cs:ip=%04X:%04X ax=%04X sp=%04X\n",
                (unsigned long)bb_trace_runs,(unsigned)C.seg[B86_CS],(unsigned)C.ip,
                (unsigned)C.r[B86_AX],(unsigned)C.r[B86_SP]);
         fflush(stdout);
     }
     if (bb_video_seen) ++bb_post_video_slices;
-    if(0) {
+    if (bb_video_seen && (bb_log_n(bb_post_video_slices) || bb_v6_linear((uint16_t)C.seg[B86_CS],(uint16_t)C.ip)>=0x100000u)) {
         ++bb_handoff_n;
         bb_cpu_snapshot("jit-enter",&C,-1,0);
     }
@@ -867,20 +573,8 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     const uint16_t v13_before_cs=(uint16_t)C.seg[B86_CS];
     const uint16_t v13_before_ip=(uint16_t)C.ip;
     const uint16_t v13_before_sp=(uint16_t)C.r[B86_SP];
-    const uint16_t v17_before_ss=(uint16_t)C.seg[B86_SS];
-    uint64_t v24_jit_t0=bb_now_us();
     int rc = b86_jit_run(&C, bb_v10_budget);
-    bb_v24_jit_us+=bb_now_us()-v24_jit_t0;
-    ++bb_v24_jit_calls;
-    bb_v24_jit_insns+=C.icnt;
-    bb_v25_bios_time();
-    if(C.icnt==0u){++bb_v24_zero;if(rc==B86_TRAP)++bb_v24_zero_trap;}
-    if(bb_video_seen && bb_v24_jit_calls>0 && (bb_v24_jit_calls%8192u)==0u){
-        bb_v24_last_bda_tick=bb_v24_bda_tick();
-        bb_v24_report();
-    }
-
-    if (0) {
+    if (bb_video_seen && bb_post_video_slices <= 12u) {
         printf("[bb-v13] HANDOFF slice=%lu from=%04X:%04X sp=%04X to=%04X:%04X sp=%04X rc=%d retired=%lu interpreter-next=%u\n",
                (unsigned long)bb_post_video_slices,
                (unsigned)v13_before_cs,(unsigned)v13_before_ip,(unsigned)v13_before_sp,
@@ -891,11 +585,11 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if(bb_video_seen)bb_v7_record(3,(uint16_t)C.seg[B86_CS],(uint16_t)C.ip,
         (uint16_t)C.seg[B86_SS],(uint16_t)C.r[B86_SP],(uint16_t)C.r[B86_AX],
         (uint16_t)C.seg[B86_DS],(uint16_t)C.seg[B86_ES],b86_get_flags(&C),C.icnt);
-    if(0) {
+    if (bb_video_seen && (bb_log_n(bb_post_video_slices) || bb_v6_linear((uint16_t)C.seg[B86_CS],(uint16_t)C.ip)>=0x100000u)) {
         ++bb_handoff_n;
         bb_cpu_snapshot("jit-leave",&C,rc,C.icnt);
     }
-    if(0) {
+    if(bb_trace_runs<=8u || (bb_trace_runs<=65536u && (bb_trace_runs&(bb_trace_runs-1u))==0u)) {
         printf("[bb-trace] JIT leave n=%lu rc=%d retired=%lu cs:ip=%04X:%04X\n",
                (unsigned long)bb_trace_runs,rc,(unsigned long)C.icnt,
                (unsigned)C.seg[B86_CS],(unsigned)C.ip);
@@ -916,25 +610,12 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
                (unsigned long)bb_v10_small_dispatches);
         bb_v7_dump("first-ivt");
     }
-    if (bb_v17_guard(rt,"jit-exit",v13_before_cs,v13_before_ip,
-                     v17_before_ss,v13_before_sp,C.icnt,rc)) {
-        rt->instructions += C.icnt; st.retired += C.icnt; ++st.slices;
-        return 1;
-    }
     (void)bb_v7_check(rt,"jit-exit");
 #ifdef BB_DEBUG
     fprintf(stderr, "[bb]   rc=%d exit %04X:%04X retired=%u\n", rc, rt->cpu.cs, rt->cpu.ip, C.icnt);
 #endif
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
-    /* Cooperative VGA presentation: one 12-row tile per eligible dispatch.
-       Each call returns quickly so DOS execution and USB keyboard service continue.
-       The LCD presenter maintains its own 1 ms strip cadence. */
-    if (bb_video_seen) {
-        uint64_t t=bb_now_us();
-        bb_lcd_vga_tick();
-        bb_v24_lcd_us+=bb_now_us()-t;
-        ++bb_v24_lcd_calls;
-    }
+    bb_lcd_vga_tick();
 #endif
     rt->instructions += C.icnt;
     st.retired += C.icnt;
@@ -996,19 +677,6 @@ void bb_live_print_extra(void (*say)(const char *fmt, ...))
     static BbLiveStats prev;
     BbLiveStats s;
     bb_live_get_stats(&s);
-    bb_v24_last_bda_tick=bb_v24_bda_tick();
-    say("[bb-v24] PROFILE wall-ms=%llu jit-calls=%llu jit-zero=%llu jit-insns=%llu jit-ms=%llu interp-calls=%llu interp-insns=%llu lcd-calls=%llu lcd-ms=%llu hash-ms=%llu bda-ticks=%lu->%lu\n",
-        (unsigned long long)(bb_video_seen?(bb_now_us()-bb_v24_start_us)/1000u:0),
-        (unsigned long long)bb_v24_jit_calls,(unsigned long long)bb_v24_zero,
-        (unsigned long long)bb_v24_jit_insns,(unsigned long long)(bb_v24_jit_us/1000u),
-        (unsigned long long)bb_v24_interp_calls,(unsigned long long)bb_v24_interp_insns,
-        (unsigned long long)bb_v24_lcd_calls,(unsigned long long)(bb_v24_lcd_us/1000u),
-        (unsigned long long)(bb_v24_hash_us/1000u),
-        (unsigned long)bb_v24_start_bda_tick,(unsigned long)bb_v24_last_bda_tick);
-    say("[bb-v23] STAT ticks=%lu changed-samples=%lu keys=%lu dropped=%lu input-polls=%lu int16=%u\n",
-        (unsigned long)bb_v23_lcd_ticks,(unsigned long)bb_v23_changed_samples,
-        (unsigned long)bb_v23_keys,(unsigned long)bb_v23_key_drop,
-        (unsigned long)bb_v23_polls,bb_v22_key_calls);
     say("[bb-live-time] native=%llu ms (translate=%llu ms) sync=%llu ms flushes=%llu dispatches=%llu fast=%llu native-misses=%llu translate-misses=%llu\n",
         (unsigned long long)(s.native_us / 1000u), (unsigned long long)(s.translate_us / 1000u),
         (unsigned long long)(s.sync_us / 1000u), (unsigned long long)s.flushes,
