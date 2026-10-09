@@ -38,6 +38,8 @@
 /* microsecond clock, also used by blitz86 for translate time (-DB86_NOW=bb_now_us) */
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 #include "hardware/structs/xip_ctrl.h"
+#include "hardware/watchdog.h"
+#include "hardware/structs/watchdog.h"
 uint64_t bb_now_us(void) { return time_us_64(); }
 /* v38: XIP/QMI cache counters (flash + PSRAM, both cores). The hardware
    counters SATURATE at 2^32-1 (after ~15 s at 300 MHz the old difference
@@ -67,7 +69,7 @@ uint64_t bb_now_us(void)
 #endif
 
 #ifndef BB_TR_PAGES
-#define BB_TR_PAGES 64u            /* byte-exact pages (512 B bitmap each, SRAM) */
+#define BB_TR_PAGES 24u            /* byte-exact pages (512 B bitmap each, SRAM); v41: 64 -> 24 (DOS runs used 15) */
 #endif
 
 #ifndef BB_CODE_BYTES
@@ -122,6 +124,7 @@ void *bb_meta_calloc(size_t n, size_t size)
 void bb_meta_free(void *p) { (void)p; }
 #endif
 static B86Cpu C;
+static void bb_diag_boot_report(void);   /* v42 */
 static struct B86Jit *J;
 static MdRuntime *R;
 static uint16_t bios_seg;
@@ -296,7 +299,10 @@ typedef struct {
     uint8_t kind;
     uint32_t retired;
 } BbV7Rec;
-static BbV7Rec bb_v7_ring[BB_V7_RING];
+#ifndef __uninitialized_psram
+#define __uninitialized_psram(name)   /* host builds: ordinary .bss */
+#endif
+static BbV7Rec __uninitialized_psram("bb_v7") bb_v7_ring[BB_V7_RING];   /* v46: debug ring in PSRAM */
 static unsigned bb_v7_write,bb_v7_count;
 static int bb_v7_captured;
 static int bb_v10_ivt_seen;
@@ -394,7 +400,7 @@ typedef struct {
     uint16_t cs,ip,ss,sp,ax,bx,cx,dx,si,di,bp,ds,es,flags;
     uint8_t code[8],stack[12];
 } BbV21Step;
-static BbV21Step bb_v21_steps[BB_V21_HISTORY];
+static BbV21Step __uninitialized_psram("bb_v21") bb_v21_steps[BB_V21_HISTORY];   /* v46: PSRAM */
 static uint32_t bb_v21_next,bb_v21_count;
 static int bb_v21_active,bb_v21_dumped;
 int bb_live_v21_enabled(const MdRuntime *rt) {
@@ -635,6 +641,26 @@ static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     ++bb_v23_keys;
     printf("[bb-v23] KEY ascii=%02X scan=%02X queued=%lu\n",c,bb_v23_scan(c),(unsigned long)bb_v23_keys);
 }
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+/* v39a: PSRAM miss calibration, on demand (Ctrl+T) instead of at boot.
+   Uses the 64 KiB above 1 MiB of the guest buffer (unused by DOS 2.0);
+   contents are read and written back unchanged. */
+static void bb_v39_psram_calibrate(void)
+{
+    if (!R) return;
+    volatile uint8_t *p = R->cpu.memory + 0x100000u;
+    uint32_t sum = 0;
+    for (unsigned i = 0; i < 65536u; i += 8u) sum += p[i];
+    uint64_t t0 = time_us_64();
+    for (unsigned r = 0; r < 4u; ++r) for (unsigned i = 0; i < 65536u; i += 8u) sum += p[i];
+    uint64_t t1 = time_us_64();
+    for (unsigned r = 0; r < 4u; ++r) for (unsigned i = 0; i < 65536u; i += 8u) p[i] = p[i];
+    uint64_t t2 = time_us_64();
+    printf("[bb-v38-psram] read-miss=%lu ns rmw-miss=%lu ns (per 8-byte line, 32768 lines each; sum=%lu)\n",
+           (unsigned long)((t1 - t0) * 1000u / 32768u), (unsigned long)((t2 - t1) * 1000u / 32768u), (unsigned long)sum);
+    fflush(stdout);
+}
+#endif
 static void bb_v33_stats_now(void);
 static void bb_v23_poll_input(void) {
     if(!bb_video_seen||!R)return;
@@ -646,6 +672,15 @@ static void bb_v23_poll_input(void) {
        serial port, so Ctrl+] (0x1D) is handled here instead of reaching the
        guest keyboard queue. */
     if(c==0x1D){bb_v33_stats_now();return;}
+    if(c==0x14){bb_v39_psram_calibrate();return;}   /* v39a: Ctrl+T */
+    if(c==0x10){                      /* v38: Ctrl+P toggles the LCD presenter */
+        extern volatile uint32_t bb_lcd_paused;
+        bb_lcd_paused^=1u;
+        bb_v33_stats_now();           /* interval boundary for the A/B comparison */
+        printf("[bb-v38] LCD presenter %s (Ctrl+P toggles)\n",bb_lcd_paused?"PAUSED":"running");
+        fflush(stdout);
+        return;
+    }
     if(c>=0)bb_v23_enqueue_ascii(R->cpu.memory,(unsigned)c);
 #endif
 }
@@ -687,6 +722,144 @@ static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
     return 1;
 }
 
+
+/* ------------------------------------------------------------------------ */
+/* v40: SRAM-backed guest pages (blitz86 -DB86_PAGED)                        */
+/*                                                                          */
+/* 3DBENCH streams two 64 KiB frame buffers through the 16 KiB XIP cache    */
+/* every frame (~90% of core 0's PSRAM misses; a written line costs ~650    */
+/* ns). blitz86 can move 4 KiB guest pages to SRAM; blitzBUS chooses:       */
+/*  - VGA: A000:0000-FFFF while mode 13h is active. bb_vga and the LCD      */
+/*    presenter read the SRAM copy, so core 1 stops reading PSRAM too.      */
+/*  - "bbuf": the 16 consecutive conventional-memory pages with the most    */
+/*    REP STOS/MOVS store traffic (a program's back buffer), re-evaluated   */
+/*    about once a second.                                                  */
+/* Coherence: microDOS reads/writes guest memory directly, so the bbuf      */
+/* window is copied back before any call into microDOS (HLE interrupts,     */
+/* BIOS-segment slices) and re-chosen later. The VGA window is not: DOS     */
+/* I/O straight into A000 is not supported while it is mapped.             */
+/* Known limit (accepted): a 16-bit access straddling a window's first or   */
+/* last byte is not exact (frames carry a guard byte so it cannot overwrite */
+/* SRAM).                                                                    */
+/* ------------------------------------------------------------------------ */
+#ifndef BB_PAGED_SRAM
+#define BB_PAGED_SRAM 1
+#endif
+#define BB_WIN_BYTES 0x10000u
+#define BB_WIN_PAGES (BB_WIN_BYTES >> 12)
+#ifndef BB_BBUF_MIN_BYTES
+#define BB_BBUF_MIN_BYTES (256u * 1024u)    /* REP bytes per evaluation to bother */
+#endif
+#if defined(B86_PAGED) && BB_PAGED_SRAM
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+static uint8_t bb_vram[BB_WIN_BYTES + 4u] __attribute__((aligned(4096)));
+#else   /* host harness: frames where their SMC-table index is clear of guest lines (as on the Pico) */
+static uint8_t *bb_host_frames(void) { static uint8_t *f; if (!f) f = (uint8_t *)aligned_alloc(0x200000, 0x200000); return f; }
+#define bb_vram (bb_host_frames() + 0x10000u)
+#endif
+#ifndef BB_BBUF_SRAM
+#define BB_BBUF_SRAM 1       /* v46: on again (blitz86 (n) moved ~56 KiB of translator to flash) */
+#endif
+#if BB_BBUF_SRAM
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+static uint8_t bb_bbuf[BB_WIN_BYTES + 4u] __attribute__((aligned(4096)));
+#else
+#define bb_bbuf (bb_host_frames() + 0x30000u)
+#endif
+#endif
+static int bb_vram_mapped;
+static uint32_t bb_bbuf_lin;              /* 0: not mapped */
+static unsigned bb_bbuf_cooldown;
+static uint64_t bb_v40_maps, bb_v40_unmaps, bb_v40_vga_maps;
+static uint32_t bb_v40_slices;
+
+static void bb_v40_vga_sync(void)
+{
+    if (!J) return;
+    int want = bb_vga_active();
+    if (want && !bb_vram_mapped) {
+        int mr = b86_map_range(&C, 0xA0000u, BB_WIN_BYTES, bb_vram);
+        if (mr == 0) {
+            bb_vram_mapped = 1; ++bb_v40_vga_maps;
+            bb_vga_set_vram(bb_vram);
+            printf("[bb-v40-paged] A000 window -> SRAM %p\n", (void *)bb_vram); fflush(stdout);
+        } else {
+            printf("[bb-v40-paged] A000 window NOT mapped (rc=%d)\n", mr); fflush(stdout);
+            bb_vram_mapped = -1;              /* do not retry every INT 10h */
+        }
+    } else if (!want && bb_vram_mapped == 1) {
+        bb_vga_set_vram(NULL);
+        b86_unmap_range(&C, 0xA0000u, BB_WIN_BYTES);
+        bb_vram_mapped = 0;
+        printf("[bb-v40-paged] A000 window back to PSRAM\n"); fflush(stdout);
+    }
+}
+/* before microDOS touches guest memory */
+static void bb_v40_release(const char *why)
+{
+    if (!bb_bbuf_lin) return;
+    b86_unmap_range(&C, bb_bbuf_lin, BB_WIN_BYTES);
+    ++bb_v40_unmaps;
+    if (bb_v40_unmaps <= 8u) { printf("[bb-v40-paged] bbuf %05lX back to PSRAM (%s)\n", (unsigned long)bb_bbuf_lin, why); fflush(stdout); }
+    bb_bbuf_lin = 0;
+    bb_bbuf_cooldown = 2u;
+}
+/* once per ~1024 native slices: pick the hottest REP-store window */
+static void bb_v40_tick(void)
+{
+#if !BB_BBUF_SRAM
+    return;
+#endif
+    if (!J || (++bb_v40_slices & 1023u)) return;
+    uint32_t *cnt = C.rep_page_bytes;
+    /* blitz86 does not translate stack (SS) accesses: no mapped page may lie
+       in the current SS window */
+    uint32_t ss_lo = C.seg[B86_SS] << 4, ss_hi = ss_lo + 0x10000u;
+    if (bb_bbuf_lin && bb_bbuf_lin < ss_hi && bb_bbuf_lin + BB_WIN_BYTES > ss_lo) bb_v40_release("stack moved into window");
+    if (bb_bbuf_cooldown) { --bb_bbuf_cooldown; memset(cnt, 0, sizeof C.rep_page_bytes); return; }
+    if (!bb_bbuf_lin) {
+        /* best 16-page windows by REP store bytes; try them in order, since a
+           window holding translated code (or a bad frame) is refused */
+        const unsigned lo = 0x10000u >> 12, hi = 0xA0000u >> 12;     /* skip DOS, stop below VGA */
+        unsigned tried[8]; unsigned ntried = 0;
+        for (unsigned attempt = 0; attempt < 8u && !bb_bbuf_lin; ++attempt) {
+            uint64_t best = 0; unsigned bs = 0;
+            for (unsigned p = lo; p + BB_WIN_PAGES <= hi; ++p) {
+                uint32_t wl = p << 12;
+                if (wl < ss_hi && wl + BB_WIN_BYTES > ss_lo) continue;
+                int seen = 0;
+                for (unsigned t = 0; t < ntried; ++t) seen |= tried[t] == p;
+                if (seen) continue;
+                uint64_t sum = 0;
+                for (unsigned q = p; q < p + BB_WIN_PAGES; ++q) sum += cnt[q];
+                if (sum > best) { best = sum; bs = p; }
+            }
+            if (best < BB_BBUF_MIN_BYTES) break;
+            tried[ntried++] = bs;
+            uint32_t lin = bs << 12;
+#if BB_BBUF_SRAM
+            int mr = b86_map_range(&C, lin, BB_WIN_BYTES, bb_bbuf);
+            if (mr == 0) {
+                bb_bbuf_lin = lin; ++bb_v40_maps;
+                if (bb_v40_maps <= 8u) { printf("[bb-v40-paged] bbuf %05lX-%05lX -> SRAM (%llu REP bytes)\n", (unsigned long)lin, (unsigned long)(lin + BB_WIN_BYTES - 1u), (unsigned long long)best); fflush(stdout); }
+            } else {
+                static unsigned fails;
+                if (++fails <= 8u) { printf("[bb-v44-paged] bbuf %05lX map refused rc=%d (%s, frame %p)\n", (unsigned long)lin, mr,
+                                           mr == -3 ? "translated code in window" : mr == -2 ? "frame index collides" : "other", (void *)bb_bbuf); fflush(stdout); }
+            }
+#else
+            (void)lin;
+#endif
+        }
+    }
+    memset(cnt, 0, sizeof C.rep_page_bytes);
+}
+#else
+static void bb_v40_vga_sync(void) {}
+static void bb_v40_release(const char *why) { (void)why; }
+static void bb_v40_tick(void) {}
+#endif
+
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
     if (v == 0x16u) {
@@ -724,6 +897,7 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
             c->r[B86_CX]=cx; c->r[B86_DX]=dx;
             c->r[B86_BP]=bp; b86_set_seg(c,B86_ES,es);
             b86_set_flags(c,f);
+            bb_v40_vga_sync();                  /* v40: A000 follows the video mode */
             ++st.hook_calls;
             if(bb_video_seen)bb_v7_record(1,(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,
                 (uint16_t)c->seg[B86_SS],(uint16_t)c->r[B86_SP],(uint16_t)c->r[B86_AX],
@@ -744,6 +918,17 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
     fprintf(stderr, "[bb]   int %02X at %04X:%04X\n", v, (unsigned)c->seg[B86_CS], (unsigned)c->ip);
 #endif
     if (R->hooks.interrupt == NULL) return 0;
+    if (v == 0) { static unsigned n0; if (++n0 <= 3u) { printf("[bb-v46] INT 00 (divide error) n=%u at %04X:%04X ax=%04X dx=%04X\n", n0, (unsigned)c->seg[B86_CS], (unsigned)c->ip, (unsigned)c->r[B86_AX], (unsigned)c->r[B86_DX]); fflush(stdout); } }
+#if defined(B86_PAGED) && BB_PAGED_SRAM
+    /* v46: only the DOS 2 device-driver vector (0xF1: request packets and
+       transfer buffers) makes microDOS touch guest memory; others (e.g. INT 00
+       raised by 3DBENCH, the 0xF0 strategy call) leave the window alone */
+    if (bb_bbuf_lin && v == 0xF1u) {
+        static char why[32];
+        snprintf(why, sizeof why, "microDOS INT %02X AH=%02X", v, (unsigned)((c->r[B86_AX] >> 8) & 0xFFu));
+        bb_v40_release(why);
+    }
+#endif
     to_md();                                    /* c->ip = return address */
     if (!R->hooks.interrupt(R, v, R->hooks.user)) return 0;
     ++st.hook_calls;
@@ -843,6 +1028,7 @@ static int start(MdRuntime *rt)
     if (rt->hooks.interrupt != md_msdos2_boot_interrupt || rt->hooks.user == NULL) { failed = 1; fail_reason = "not-msdos2-boot"; return 0; }
     if (((uintptr_t)rt->cpu.memory & 63u) != 0) { failed = 1; fail_reason = "guest-not-64-aligned"; return 0; }
     bios_seg = ((const MdMsdos2Boot *)rt->hooks.user)->bios_segment;
+    bb_diag_boot_report();
     bb_vga_init(rt->cpu.memory);
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
@@ -892,6 +1078,96 @@ static int start(MdRuntime *rt)
 
 void bb_live_set_enabled(int on) { enabled = on; }
 
+
+/* ------------------------------------------------------------------------ */
+/* v42: hang / fault diagnostics (RP2350). While mode 13h is active a 3 s    */
+/* watchdog runs, fed every native slice; each slice also records the guest */
+/* CS:IP in watchdog scratch[3]. A HardFault records PC/LR/CFSR/BFAR. Both  */
+/* reboot; the next boot prints what was recorded. scratch[4..7] belong to  */
+/* the SDK's watchdog_reboot, so only scratch[0..3] are used.               */
+/* ------------------------------------------------------------------------ */
+#define BB_DIAG_ARMED 0xB86A0001u
+#define BB_DIAG_FAULT 0xB86F0002u
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+static int bb_wd_on;
+/* v45: full fault record in RAM that crt0 does not clear */
+static uint32_t __attribute__((section(".uninitialized_data.bb_fault"))) bb_fault_rec[16];
+#define BB_FAULT_MAGIC 0xB86FA017u
+void bb_fault_c(uint32_t *sf, uint32_t exc_lr)
+{
+    watchdog_hw->scratch[0] = BB_DIAG_FAULT;
+    watchdog_hw->scratch[1] = sf[6];                     /* stacked PC */
+    watchdog_hw->scratch[2] = sf[5];                     /* stacked LR */
+    watchdog_hw->scratch[3] = (*(volatile uint32_t *)0xE000ED28u);   /* CFSR */
+    bb_fault_rec[0] = BB_FAULT_MAGIC;
+    for (int i = 0; i < 8; ++i) bb_fault_rec[1 + i] = sf[i];          /* r0 r1 r2 r3 r12 lr pc xpsr */
+    bb_fault_rec[9]  = *(volatile uint32_t *)0xE000ED2Cu;             /* HFSR */
+    bb_fault_rec[10] = *(volatile uint32_t *)0xE000ED38u;             /* BFAR */
+    bb_fault_rec[11] = *(volatile uint32_t *)0xE000ED34u;             /* MMFAR */
+    bb_fault_rec[12] = *(volatile uint32_t *)0xE000EDE4u;             /* SFSR */
+    bb_fault_rec[13] = *(volatile uint32_t *)0xE000EDE8u;             /* SFAR */
+    bb_fault_rec[14] = exc_lr;
+    bb_fault_rec[15] = (C.seg[B86_CS] << 16) | (C.ip & 0xFFFFu);     /* guest CS:IP at last sync */
+    watchdog_reboot(0, 0, 10);
+    for (;;) {}
+}
+void __attribute__((naked)) isr_hardfault(void)
+{
+    __asm volatile(
+        "tst lr, #4      \n"
+        "ite eq          \n"
+        "mrseq r0, msp   \n"
+        "mrsne r0, psp   \n"
+        "mov r1, lr      \n"
+        "b bb_fault_c    \n");
+}
+static void bb_diag_boot_report(void)
+{
+    uint32_t m = watchdog_hw->scratch[0];
+    if (m == BB_DIAG_FAULT) {
+        printf("[bb-v42-diag] PREVIOUS RUN HARDFAULT pc=%08lX lr=%08lX cfsr=%08lX\n",
+               (unsigned long)watchdog_hw->scratch[1], (unsigned long)watchdog_hw->scratch[2],
+               (unsigned long)watchdog_hw->scratch[3]);
+        if (bb_fault_rec[0] == BB_FAULT_MAGIC)
+            printf("[bb-v45-diag] r0=%08lX r1=%08lX r2=%08lX r3=%08lX r12=%08lX xpsr=%08lX hfsr=%08lX bfar=%08lX mmfar=%08lX sfsr=%08lX sfar=%08lX exc_lr=%08lX guest=%04lX:%04lX code=%p..%p\n",
+                   (unsigned long)bb_fault_rec[1], (unsigned long)bb_fault_rec[2], (unsigned long)bb_fault_rec[3],
+                   (unsigned long)bb_fault_rec[4], (unsigned long)bb_fault_rec[5], (unsigned long)bb_fault_rec[8],
+                   (unsigned long)bb_fault_rec[9], (unsigned long)bb_fault_rec[10], (unsigned long)bb_fault_rec[11],
+                   (unsigned long)bb_fault_rec[12], (unsigned long)bb_fault_rec[13], (unsigned long)bb_fault_rec[14],
+                   (unsigned long)(bb_fault_rec[15] >> 16), (unsigned long)(bb_fault_rec[15] & 0xFFFFu),
+                   (void *)bb_code, (void *)(bb_code + sizeof bb_code));
+    }
+    else if (m == BB_DIAG_ARMED && watchdog_enable_caused_reboot())
+        printf("[bb-v42-diag] PREVIOUS RUN HUNG (3 s watchdog) last native slice at guest %04lX:%04lX, slice %lu\n",
+               (unsigned long)(watchdog_hw->scratch[3] >> 16), (unsigned long)(watchdog_hw->scratch[3] & 0xFFFFu),
+               (unsigned long)watchdog_hw->scratch[1]);
+    watchdog_hw->scratch[0] = 0;
+    bb_fault_rec[0] = 0;
+    fflush(stdout);
+}
+static void bb_diag_slice(void)
+{
+    int vga = bb_vga_active();
+    if (vga && !bb_wd_on) {
+        watchdog_hw->scratch[0] = BB_DIAG_ARMED;
+        watchdog_hw->scratch[1] = 0;
+        watchdog_enable(3000, 1);
+        bb_wd_on = 1;
+    } else if (!vga && bb_wd_on) {          /* back at the DOS prompt: may block on input */
+        watchdog_disable();
+        watchdog_hw->scratch[0] = 0;
+        bb_wd_on = 0;
+    }
+    if (bb_wd_on) {
+        watchdog_hw->scratch[3] = (C.seg[B86_CS] << 16) | (C.ip & 0xFFFFu);
+        watchdog_hw->scratch[1]++;
+        watchdog_update();
+    }
+}
+#else
+static void bb_diag_boot_report(void) {}
+static void bb_diag_slice(void) {}
+#endif
 B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
@@ -899,8 +1175,10 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (R == NULL && !start(rt)) return 0;
     /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
     bb_v23_poll_input();
+    bb_diag_slice();                      /* v42: watchdog + last guest CS:IP */
     bb_v25_bios_time();
     if(rt==R)bb_irq36_dispatch(rt,bb_now_us());
+    if (rt == R && rt->cpu.cs == bios_seg) bb_v40_release("BIOS segment");
     if (rt != R || rt->cpu.cs == bios_seg) {
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
@@ -910,6 +1188,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
         return 0;
     }
 
+    bb_v40_tick();
     uint64_t t0 = bb_now_us();
     track_pages();
     sync_pages();                       /* writes made while microDOS ran */

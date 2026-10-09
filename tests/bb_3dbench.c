@@ -114,7 +114,11 @@ int main(int argc, char **argv)
     uint8_t *kernel = load(argv[1], &ksz);
     e.disk = load(argv[2], &e.disk_size);
     /* blitz86 needs the A20-on window (1 MiB + HMA); microDOS uses the first 1 MiB */
+#ifdef B86_PAGED   /* same layout as the Pico build: 640 KiB into a 2 MiB window */
+    uint8_t *memory = (uint8_t *)aligned_alloc(0x200000, 0x400000) + 0xA0000u;
+#else
     uint8_t *memory = aligned_alloc(64, (B86_MEM_BYTES + 63u) & ~63u);
+#endif
     if (!kernel || !e.disk || !memory) { fprintf(stderr, "cannot load inputs\n"); return 2; }
     memset(memory, 0, B86_MEM_BYTES);
     bb_live_set_enabled(!interp);
@@ -206,12 +210,17 @@ int main(int argc, char **argv)
     if (getenv("FB_DUMP")) {       /* mode 13h screen + RGB565 palette for inspection */
         extern const uint16_t *bb_vga_palette565(void);
         FILE *f = fopen(getenv("FB_DUMP"), "wb");
-        if (f) { fwrite(memory + 0xA0000, 1, 64000, f); fwrite(bb_vga_palette565(), 2, 256, f); fclose(f); }
+        extern const uint8_t *bb_vga_framebuffer(void);
+        if (f) { fwrite(bb_vga_framebuffer(), 1, 64000, f); fwrite(bb_vga_palette565(), 2, 256, f); fclose(f); }
     }
 #ifdef B86_COND_HISTO
     { extern uint32_t b86_cond_ip[1<<20], b86_flags_ip[1<<20]; FILE *f=fopen("/tmp/cip.bin","wb"); fwrite(b86_cond_ip,4,1<<20,f); fclose(f);
       f=fopen("/tmp/fip.bin","wb"); fwrite(b86_flags_ip,4,1<<20,f); fclose(f);
+      { extern uint32_t b86_cold_ip[1<<20]; FILE *g=fopen("/tmp/coldip.bin","wb"); fwrite(b86_cold_ip,4,1<<20,g); fclose(g); }
       { extern uint32_t b86_disp_ip[1<<20], b86_xr[8]; f=fopen("/tmp/dip.bin","wb"); fwrite(b86_disp_ip,4,1<<20,f); fclose(f);
+        { extern uint64_t b86_rep_bytes[4]; extern uint32_t b86_rep_es[65536];
+          printf("[rep] stosb=%llu stosw=%llu movsb=%llu movsw=%llu\n", (unsigned long long)b86_rep_bytes[0], (unsigned long long)b86_rep_bytes[1], (unsigned long long)b86_rep_bytes[2], (unsigned long long)b86_rep_bytes[3]);
+          for (int k = 0; k < 65536; ++k) if (b86_rep_es[k] > 1000000u) printf("[rep] ES=%04X bytes=%u\n", k, b86_rep_es[k]); }
         printf("[xr] %u %u %u %u %u %u %u %u\n", b86_xr[0],b86_xr[1],b86_xr[2],b86_xr[3],b86_xr[4],b86_xr[5],b86_xr[6],b86_xr[7]); } f=fopen("/tmp/mem2.bin","wb"); fwrite(memory,1,1<<20,f); fclose(f); }
 #endif
     return 0;

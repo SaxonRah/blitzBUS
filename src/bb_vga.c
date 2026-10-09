@@ -6,6 +6,11 @@
 #include <string.h>
 #define VMEM_SIZE 0x110000u
 static uint8_t *mem;
+/* v40: when blitz86 keeps the A000 window in SRAM, all VGA accesses here
+   (mode clear, pixel BIOS calls, the LCD presenter) use that copy. */
+static uint8_t *vram;
+#define VGA_A(o) (vram ? vram + ((o) - 0xA0000u) : mem + (o))
+void bb_vga_set_vram(uint8_t *p){vram=p;}
 static uint8_t mode, page, cols;
 static uint8_t dac[256][3], dac_read, dac_write, rc, wc, pel_mask, dac_read_mode;
 static uint8_t attr[32], attr_index, attr_flip, attr_enable=0x20, border;
@@ -52,7 +57,7 @@ static void video_bda(void){
 }
 static void set_mode(uint8_t m,bool preserve){
     mode=m;page=0;cols=(m==0x13?40:80);
-    if(!preserve)memset(mem+(m==0x13?0xA0000:0xB8000),0,(m==0x13?64000:4000));
+    if(!preserve){if(m==0x13)memset(VGA_A(0xA0000u),0,64000);else memset(mem+0xB8000,0,4000);}
     if(m==0x13)defaults();
     memset(cursor,0,sizeof cursor);video_bda();
 }
@@ -155,9 +160,9 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
         return false;
     case 0x0C:
         if(mode==0x13&&*cx<320u&&*dx<200u){unsigned o=0xA0000+*dx*320u+*cx;
-            if(al&128)mem[o]^=al&127;else mem[o]=al;return true;}return false;
+            if(al&128)*VGA_A(o)^=al&127;else *VGA_A(o)=al;return true;}return false;
     case 0x0D:
-        if(mode==0x13&&*cx<320u&&*dx<200u){*ax=(uint16_t)((*ax&0xFF00u)|mem[0xA0000+*dx*320u+*cx]);return true;}return false;
+        if(mode==0x13&&*cx<320u&&*dx<200u){*ax=(uint16_t)((*ax&0xFF00u)|*VGA_A(0xA0000u+*dx*320u+*cx));return true;}return false;
     case 0x0E:put_char(al,(uint8_t)*bx,*bx>>8,1);return true;
     case 0x0F:*ax=(uint16_t)((cols<<8)|mode);*bx=(uint16_t)((page<<8)|(*bx&255u));return true;
     case 0x10:return bios_palette(al,bx,cx,dx,*es);
@@ -201,6 +206,6 @@ bool bb_vga_port_out(uint16_t p,uint8_t v,uint64_t us){
     }
 }
 bool bb_vga_active(void){return mode==0x13;}
-const uint8_t *bb_vga_framebuffer(void){return mem?mem+0xA0000:0;}
+const uint8_t *bb_vga_framebuffer(void){return mem?VGA_A(0xA0000u):0;}
 const uint16_t *bb_vga_palette565(void){return palette;}
 uint32_t bb_vga_palette_generation(void){return palette_gen;}

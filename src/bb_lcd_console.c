@@ -182,6 +182,7 @@ void bb_lcd_console_flush(void){
 #endif
 static uint16_t bb_v27_tiles[2][BB_V27_W * BB_V27_TILE_H];
 static volatile uint32_t bb_v27_request;
+volatile uint32_t bb_lcd_paused;      /* v38: set from bb_live (Ctrl+P) */
 static volatile uint32_t bb_v27_busy;
 static volatile uint32_t bb_v27_parked;
 static uint32_t bb_v27_started;
@@ -355,7 +356,9 @@ void bb_lcd_vga_tick(void) {
             multicore_launch_core1(bb_v27_presenter);
         }
         bb_v27_was_vga=1u;
-        __atomic_store_n(&bb_v27_request,1u,__ATOMIC_RELEASE);
+        /* v38: Ctrl+P on the serial console parks core 1 (no PSRAM traffic)
+           so XIP misses and MIPS can be compared with and without it. */
+        __atomic_store_n(&bb_v27_request,bb_lcd_paused?0u:1u,__ATOMIC_RELEASE);
         /* Cheap dispatch counter: only inspect time and counters occasionally. */
         if ((++bb_v28_poll & 8191u)==0u) {
             const uint32_t ms=to_ms_since_boot(get_absolute_time());

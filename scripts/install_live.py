@@ -19,8 +19,14 @@ def main():
     hot=os.environ.get("BB_HOT_THRESHOLD","128")
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
-    code_kb=os.environ.get("BB_CODE_KB","192")
-    if not code_kb.isdigit() or not 64<=int(code_kb)<=288:
+    paged=os.environ.get("BB_PAGED","1")
+    if paged not in ("0","1"):
+        raise SystemExit("BB_PAGED must be 0 or 1 (v40 SRAM-backed guest pages)")
+    bbuf=os.environ.get("BB_BBUF","1")
+    if bbuf not in ("0","1"):
+        raise SystemExit("BB_BBUF must be 0 or 1 (64 KiB SRAM back-buffer window)")
+    code_kb=os.environ.get("BB_CODE_KB",("232" if bbuf=="1" else "240") if paged=="1" else "192")
+    if not code_kb.isdigit() or not 64<=int(code_kb)<=304:
         raise SystemExit("BB_CODE_KB must be 64..288 (SRAM code buffer, KiB)")
     if lcd_peri not in ("48000000","150000000"):
         raise SystemExit("BB_LCD_PERI_HZ must be 48000000 or 150000000")
@@ -89,7 +95,19 @@ def main():
     guest_decl='__uninitialized_psram("md_guest") __attribute__((aligned(16)))'
     if pico_text.count(guest_decl)!=1:
         raise SystemExit('Guest buffer declaration changed; originals untouched')
-    pico_text=pico_text.replace(guest_decl,'__uninitialized_psram("md_guest") __attribute__((aligned(64)))',1)
+    if paged=="1":
+        # v40 (B86_PAGED): 4 KiB-aligned guest buffer at 640 KiB into a 2 MiB
+        # window, so blitz86's 32 Ki-entry SMC line map indexes guest lines
+        # without colliding with SRAM addresses (stores to SRAM-mapped pages
+        # must find zero there). Costs up to ~2.6 MiB of otherwise unused PSRAM.
+        if pico_text.count(guest_decl+'\n    g_guest[MD_GUEST_BYTES];')!=1:
+            raise SystemExit('Guest buffer declaration changed; originals untouched')
+        pico_text=pico_text.replace(guest_decl+'\n    g_guest[MD_GUEST_BYTES];',
+            '__uninitialized_psram("md_guest") __attribute__((aligned(0x200000)))\n'
+            '    g_guest_raw[0xA0000u + MD_GUEST_BYTES];\n'
+            '#define g_guest (g_guest_raw + 0xA0000u)',1)
+    else:
+        pico_text=pico_text.replace(guest_decl,'__uninitialized_psram("md_guest") __attribute__((aligned(64)))',1)
     # Send the live counters on every Ctrl+] stats request, not only milestones.
     # Generate *actual C lines*.  The C format strings use escaped newline bytes.
     stats_block = r'''g_con.stats_requested=false;md_stats(start_us);
@@ -142,7 +160,8 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
-    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES=32768u BB_HOT_THRESHOLD={hot}u
+    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u
+    {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
     B86_RAM_FUNCS=1
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0

@@ -83,8 +83,9 @@ static uint8_t g_guest[MD_GUEST_BYTES] __attribute__((aligned(16)));
 static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(MD_GUEST_BYTES)))
     g_guest[MD_GUEST_BYTES];
 #else
-static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(64)))
-    g_guest[MD_GUEST_BYTES];
+static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(0x200000)))
+    g_guest_raw[0xA0000u + MD_GUEST_BYTES];
+#define g_guest (g_guest_raw + 0xA0000u)
 #endif
 #endif
 static uint8_t __uninitialized_psram("md_disk") __attribute__((aligned(16)))

@@ -9,6 +9,7 @@ bool bb_vga_port_in(uint16_t port,uint8_t *result,uint64_t now_us);
 bool bb_vga_port_out(uint16_t port,uint8_t value,uint64_t now_us);
 bool bb_vga_active(void);
 const uint8_t *bb_vga_framebuffer(void);
+void bb_vga_set_vram(uint8_t *p);   /* v40: A000 copy in SRAM (NULL: guest memory) */
 const uint16_t *bb_vga_palette565(void);
 uint32_t bb_vga_palette_generation(void);
 #endif
