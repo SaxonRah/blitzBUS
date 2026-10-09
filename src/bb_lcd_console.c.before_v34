@@ -327,20 +327,6 @@ stop_presenting:
 void bb_lcd_vga_tick(void) {
     if (!active) return;
     if (bb_vga_active()) {
-        /* v34: clear the physical margins left by the old 80x25 DOS HUD.
-           Presenter only writes LCD rows 10..309.  On a mode transition,
-           core 1 must be parked before core 0 touches LCD SPI/DMA. */
-        if (!bb_v27_was_vga) {
-            if (bb_v27_started) {
-                __atomic_store_n(&bb_v27_request,0u,__ATOMIC_RELEASE);
-                while (!__atomic_load_n(&bb_v27_parked,__ATOMIC_ACQUIRE))
-                    tight_loop_contents();
-            }
-            mr_pico_ili9341_fill_screen(&lcd,0x0000u,480,320);
-            bb_v32_field_parity=0u;
-            puts("[bb-v34-lcd] VGA transition: full LCD cleared; viewport y=10..309; parity=0");
-            fflush(stdout);
-        }
         if (!bb_v27_started) {
             printf("[bb-v32-mode] %s rows=%u windows=%u bytes=%lu; fps_x10 counts %s\n",
 #if BB_LCD_LACE

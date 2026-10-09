@@ -17,8 +17,6 @@
 #include "bb_live.h"
 #include "bb_vga.h"
 #include "bb_vga.c"
-#include "bb_pit.h"
-#include "bb_irq.h"
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
 #include "bb_lcd_console.h"
 #endif
@@ -559,8 +557,6 @@ static void bb_v24_report(void) {
        (unsigned long long)bb_v24_lcd_calls,
        (unsigned long)bb_v25_timer_updates);
     bb_v33_jit_line();
-    bb_pit_report();
-    bb_irq36_report();
     /* v34: read the actual guest-visible BIOS tick field, not the
        previously sampled bb_v24_last_bda_tick.  This is telemetry only. */
     {
@@ -747,8 +743,6 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     uint8_t result;
-    if(bb_irq36_in(port,&result))return result;
-    if(bb_pit_in(port,&result,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return result;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     if (bb_vga_port_in(port,&result,time_us_64())) {
         if(port==0x201u)bb_trace_port(port,result,++bb_trace_in201);
@@ -763,8 +757,6 @@ B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 }
 B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 {
-    if(bb_irq36_out(port,v))return;
-    if(bb_pit_out(port,v,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     if (bb_vga_port_out(port,v,time_us_64())) return;
 #else
@@ -779,19 +771,6 @@ B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
  * vector and for INT 10h subfunctions not implemented by bb_vga_int10.
  * md_interp_step has already advanced IP past CD 10 before invoking hooks.
  */
-static MdPortIn8Hook bb_v35_original_in8;
-static MdPortOut8Hook bb_v35_original_out8;
-static uint8_t bb_v35_pit_in8(MdRuntime *rt,uint16_t port,void *user) {
-    uint8_t v=0;
-    if(bb_irq36_in(port,&v))return v;
-    if(bb_pit_in(port,&v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return v;
-    return bb_v35_original_in8?bb_v35_original_in8(rt,port,user):0xffu;
-}
-static void bb_v35_pit_out8(MdRuntime *rt,uint16_t port,uint8_t v,void *user) {
-    if(bb_irq36_out(port,v))return;
-    if(bb_pit_out(port,v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return;
-    if(bb_v35_original_out8)bb_v35_original_out8(rt,port,v,user);
-}
 static MdInterruptHook bb_v15_original_interrupt;
 static unsigned bb_v15_video_calls;
 static bool bb_v15_interrupt(MdRuntime *rt, uint8_t vector, void *user)
@@ -836,8 +815,6 @@ static int start(MdRuntime *rt)
     if (((uintptr_t)rt->cpu.memory & 63u) != 0) { failed = 1; fail_reason = "guest-not-64-aligned"; return 0; }
     bios_seg = ((const MdMsdos2Boot *)rt->hooks.user)->bios_segment;
     bb_vga_init(rt->cpu.memory);
-    bb_pit_init(bb_now_us());
-    bb_irq36_init(bb_now_us());
     b86_init(&C, rt->cpu.memory);      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
     C.int_hook = hook_int;
     C.code_hook = code_hook;
@@ -855,11 +832,6 @@ static int start(MdRuntime *rt)
     if (bb_shadow) b86_jit_set_shadow(J, bb_shadow);
     bb_v15_original_interrupt = rt->hooks.interrupt;
     rt->hooks.interrupt = bb_v15_interrupt;
-    bb_v35_original_in8=rt->hooks.in8;
-    bb_v35_original_out8=rt->hooks.out8;
-    rt->hooks.in8=bb_v35_pit_in8;
-    rt->hooks.out8=bb_v35_pit_out8;
-    printf("[bb-v35-pit] shared 8253/8254 I/O installed for native and interpreter\n");
     printf("[bb-v22] Shared INT10 + INT16 adapter installed original=%s\n",
            bb_v15_original_interrupt == md_msdos2_boot_interrupt ? "msdos2" : "other");
     fflush(stdout);
@@ -892,7 +864,6 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
     bb_v23_poll_input();
     bb_v25_bios_time();
-    if(rt==R)bb_irq36_dispatch(rt,bb_now_us());
     if (rt != R || rt->cpu.cs == bios_seg) {
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
