@@ -16,6 +16,12 @@ def main():
     if lcd_lace not in ("0","1"):
         raise SystemExit("BB_LCD_LACE must be 0 (full) or 1 (alternating rows)")
     lcd_peri=os.environ.get("BB_LCD_PERI_HZ","150000000")
+    hot=os.environ.get("BB_HOT_THRESHOLD","128")
+    if not hot.isdigit() or int(hot)>255:
+        raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
+    code_kb=os.environ.get("BB_CODE_KB","192")
+    if not code_kb.isdigit() or not 64<=int(code_kb)<=288:
+        raise SystemExit("BB_CODE_KB must be 64..288 (SRAM code buffer, KiB)")
     if lcd_peri not in ("48000000","150000000"):
         raise SystemExit("BB_LCD_PERI_HZ must be 48000000 or 150000000")
     if lcd_hz not in ("24000000","40000000","75000000"):
@@ -136,7 +142,7 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
-    BB_CODE_BYTES=196608u BB_HOT_BYTES=32768u
+    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES=32768u BB_HOT_THRESHOLD={hot}u
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
     B86_RAM_FUNCS=1
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0

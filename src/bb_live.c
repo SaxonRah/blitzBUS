@@ -99,7 +99,7 @@ static const char *fail_reason = "none";
    used by the dispatcher: keep it in PSRAM, SRAM goes to the code buffer.
    Build with -DB86_CALLOC=bb_meta_calloc -DB86_FREE=bb_meta_free. */
 #ifndef BB_META_BYTES
-#define BB_META_BYTES (384u * 1024u)
+#define BB_META_BYTES (768u * 1024u)   /* + blitz86 join bitmaps (2 x 136 KiB) and heat table */
 #endif
 static uint8_t __uninitialized_psram("bb_meta") bb_meta[BB_META_BYTES] __attribute__((aligned(16)));
 static size_t bb_meta_used;
@@ -516,6 +516,29 @@ static uint64_t bb_v25_last_lcd_us;
 static uint64_t bb_v25_lcd_skipped;
 static uint32_t bb_v25_timer_updates;
 
+/* v33: blitz86 counters as deltas since the previous line (periodic and Ctrl+]) */
+static void bb_v33_jit_line(void) {
+    static B86JitStats prev;
+    static uint64_t prev_native;
+    if(!J)return;
+    const B86JitStats *s=b86_jit_stats(J);
+    printf("[bb-jit] native-ms=%llu translate-ms=%llu flushes=%llu blocks=%llu cold-insns=%llu "
+           "rt-step=%llu rt-cond=%llu rt-flags=%llu rt-light=%llu rt-smc=%llu rt-rep=%llu "
+           "joins=%llu inner=%llu splits=%llu\n",
+        (unsigned long long)((st.native_us-prev_native)/1000u),
+        (unsigned long long)((s->translate_us-prev.translate_us)/1000u),
+        (unsigned long long)(s->flushes-prev.flushes),(unsigned long long)(s->blocks-prev.blocks),
+        (unsigned long long)(s->cold_insns-prev.cold_insns),
+        (unsigned long long)(s->rt_step-prev.rt_step),(unsigned long long)(s->rt_cond-prev.rt_cond),
+        (unsigned long long)(s->rt_flags-prev.rt_flags),(unsigned long long)(s->rt_light-prev.rt_light),
+        (unsigned long long)(s->rt_smc-prev.rt_smc),(unsigned long long)(s->rt_rep-prev.rt_rep),
+        (unsigned long long)(s->joins-prev.joins),(unsigned long long)(s->inner_branches-prev.inner_branches),
+        (unsigned long long)(s->splits-prev.splits));
+    prev=*s; prev_native=st.native_us;
+    fflush(stdout);
+}
+static void bb_v24_report(void);
+static void bb_v33_stats_now(void) { bb_v24_report(); }
 static void bb_v24_report(void) {
     if(!R||!bb_video_seen)return;
     uint64_t elapsed=bb_now_us()-bb_v24_start_us;
@@ -532,6 +555,7 @@ static void bb_v24_report(void) {
        (unsigned long long)bb_v25_lcd_skipped,
        (unsigned long long)bb_v24_lcd_calls,
        (unsigned long)bb_v25_timer_updates);
+    bb_v33_jit_line();
 }
 static uint32_t bb_v24_bda_tick(void) {
     if(!R)return 0;
@@ -587,12 +611,17 @@ static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     ++bb_v23_keys;
     printf("[bb-v23] KEY ascii=%02X scan=%02X queued=%lu\n",c,bb_v23_scan(c),(unsigned long)bb_v23_keys);
 }
+static void bb_v33_stats_now(void);
 static void bb_v23_poll_input(void) {
     if(!bb_video_seen||!R)return;
     ++bb_v23_polls;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     /* Avoid draining multiple characters during a single guest slice. */
     int c=getchar_timeout_us(0);
+    /* v33: once video owns the console, this poll is the only reader of the
+       serial port, so Ctrl+] (0x1D) is handled here instead of reaching the
+       guest keyboard queue. */
+    if(c==0x1D){bb_v33_stats_now();return;}
     if(c>=0)bb_v23_enqueue_ascii(R->cpu.memory,(unsigned)c);
 #endif
 }
@@ -709,7 +738,7 @@ B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
         return result;
     }
 #else
-    if (bb_vga_port_in(port,&result,0)) return result;
+    if (bb_vga_port_in(port,&result,bb_now_us())) return result;
 #endif
     (void)c;
     return R->hooks.in8 ? R->hooks.in8(R, port, R->hooks.user) : 0xFFu;
@@ -719,7 +748,7 @@ B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     if (bb_vga_port_out(port,v,time_us_64())) return;
 #else
-    if (bb_vga_port_out(port,v,0)) return;
+    if (bb_vga_port_out(port,v,bb_now_us())) return;
 #endif
     (void)c;
     if (R->hooks.out8) R->hooks.out8(R, port, v, R->hooks.user);
@@ -796,6 +825,14 @@ static int start(MdRuntime *rt)
     fflush(stdout);
     b86_jit_set_max_block(J, 48);
     b86_jit_set_count_retired(J, 1);
+    /* Tiering: translate an entry only after BB_HOT_THRESHOLD dispatches in
+       the current cache generation; until then blitz86 interprets it. Keeps
+       a program's hot loops resident in the SRAM code buffer instead of
+       flushing it every frame (3DBENCH: 20-100 flushes per 10M insns -> 0-1). */
+#ifndef BB_HOT_THRESHOLD
+#define BB_HOT_THRESHOLD 128u
+#endif
+    b86_jit_set_hot_threshold(J, BB_HOT_THRESHOLD);
 #if MICRODOS_TRANSLATION_SUPPORT
     memcpy(gen_seen, rt->code_page_generation, sizeof gen_seen);
 #endif
@@ -857,13 +894,9 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
        Dispatches are NOT individual x86 instructions. */
     /* v13: fixed budget from the FIRST mode-13 return, independent of
        palette count, suspicious-state detection or previously observed path. */
-    const unsigned bb_v10_budget = bb_video_seen ? 256u : BB_SLICE_DISPATCH;
+    const unsigned bb_v10_budget = BB_SLICE_DISPATCH;   /* v33: the v13 256-dispatch diagnostic budget is gone */
     if (bb_v10_budget != BB_SLICE_DISPATCH) ++bb_v10_small_dispatches;
-    if (bb_video_seen && bb_post_video_slices == 1u) {
-        printf("[bb-v13] FIXED-BUDGET dispatches=%u starting-at=%04X:%04X no-shadow=1\n",
-               bb_v10_budget,(unsigned)C.seg[B86_CS],(unsigned)C.ip);
-        fflush(stdout);
-    }
+
     const uint16_t v13_before_cs=(uint16_t)C.seg[B86_CS];
     const uint16_t v13_before_ip=(uint16_t)C.ip;
     const uint16_t v13_before_sp=(uint16_t)C.r[B86_SP];
