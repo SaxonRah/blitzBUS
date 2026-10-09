@@ -748,7 +748,7 @@ static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
 #define BB_WIN_BYTES 0x10000u
 #define BB_WIN_PAGES (BB_WIN_BYTES >> 12)
 #ifndef BB_BBUF_MIN_BYTES
-#define BB_BBUF_MIN_BYTES (256u * 1024u)    /* REP bytes per evaluation to bother */
+#define BB_BBUF_MIN_BYTES (128u * 1024u)    /* REP bytes per 250 ms evaluation to bother */
 #endif
 #if defined(B86_PAGED) && BB_PAGED_SRAM
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -810,7 +810,13 @@ static void bb_v40_tick(void)
 #if !BB_BBUF_SRAM
     return;
 #endif
-    if (!J || (++bb_v40_slices & 1023u)) return;
+    /* v47: evaluate on a wall-clock period, not every 1024 slices (slice
+       lengths vary a lot; the slice clock could miss the benchmark) */
+    static uint64_t bb_v40_last_us;
+    if (!J) return;
+    uint64_t now = bb_now_us();
+    if (now - bb_v40_last_us < 250000u) return;
+    bb_v40_last_us = now; ++bb_v40_slices;
     uint32_t *cnt = C.rep_page_bytes;
     /* blitz86 does not translate stack (SS) accesses: no mapped page may lie
        in the current SS window */

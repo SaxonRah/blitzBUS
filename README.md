@@ -1,3 +1,12 @@
+# blitzBUS v47 — window chooser on a wall clock (pair with blitz86 (p))
+
+* The back-buffer window is evaluated every 250 ms of wall time instead of
+  every 1024 native slices (with blitz86 (p) slices got longer and the old
+  clock could miss the benchmark entirely). Threshold: 128 KiB of REP stores
+  per 250 ms.
+
+---
+
 # blitzBUS v46 — back buffer in SRAM too (pair with blitz86 (n))
 
 v45 (A000 in SRAM, 240 KiB code): 22.7. A cache model of 3DBENCH with A000
