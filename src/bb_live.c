@@ -39,20 +39,25 @@
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 #include "hardware/structs/xip_ctrl.h"
 uint64_t bb_now_us(void) { return time_us_64(); }
-/* XIP/QMI cache misses (flash + PSRAM), free-running 32-bit counters */
-static uint32_t xip_miss32(void) { return xip_ctrl_hw->ctr_acc - xip_ctrl_hw->ctr_hit; }
-static uint64_t xip_acc_miss;
-static uint32_t xip_last;
+/* v38: XIP/QMI cache counters (flash + PSRAM, both cores). The hardware
+   counters SATURATE at 2^32-1 (after ~15 s at 300 MHz the old difference
+   read as garbage), so they are read and cleared on every call and
+   accumulated in 64 bits. */
+static uint64_t xip_acc_miss, xip_acc_access;
 uint64_t bb_xip_misses(void)
 {
-    uint32_t m = xip_miss32();
-    xip_acc_miss += (uint32_t)(m - xip_last);
-    xip_last = m;
+    uint32_t acc = xip_ctrl_hw->ctr_acc, hit = xip_ctrl_hw->ctr_hit;
+    xip_ctrl_hw->ctr_acc = 0;
+    xip_ctrl_hw->ctr_hit = 0;
+    xip_acc_access += acc;
+    xip_acc_miss += acc >= hit ? acc - hit : 0u;
     return xip_acc_miss;
 }
+uint64_t bb_xip_accesses(void) { (void)bb_xip_misses(); return xip_acc_access; }
 #else
 #include <time.h>
 uint64_t bb_xip_misses(void) { return 0; }
+uint64_t bb_xip_accesses(void) { return 0; }
 uint64_t bb_now_us(void)
 {
     struct timespec ts;
@@ -521,12 +526,13 @@ static uint32_t bb_v25_timer_updates;
 /* v33: blitz86 counters as deltas since the previous line (periodic and Ctrl+]) */
 static void bb_v33_jit_line(void) {
     static B86JitStats prev;
-    static uint64_t prev_native;
+    static uint64_t prev_native, prev_xa, prev_xm, prev_nm;
+    uint64_t xa=bb_xip_accesses(), xm=bb_xip_misses();
     if(!J)return;
     const B86JitStats *s=b86_jit_stats(J);
     printf("[bb-jit] native-ms=%llu translate-ms=%llu flushes=%llu blocks=%llu cold-insns=%llu "
            "rt-step=%llu rt-cond=%llu rt-flags=%llu rt-light=%llu rt-smc=%llu rt-rep=%llu "
-           "joins=%llu inner=%llu splits=%llu\n",
+           "joins=%llu inner=%llu splits=%llu xip-access=%llu xip-miss=%llu native-miss=%llu\n",
         (unsigned long long)((st.native_us-prev_native)/1000u),
         (unsigned long long)((s->translate_us-prev.translate_us)/1000u),
         (unsigned long long)(s->flushes-prev.flushes),(unsigned long long)(s->blocks-prev.blocks),
@@ -535,8 +541,10 @@ static void bb_v33_jit_line(void) {
         (unsigned long long)(s->rt_flags-prev.rt_flags),(unsigned long long)(s->rt_light-prev.rt_light),
         (unsigned long long)(s->rt_smc-prev.rt_smc),(unsigned long long)(s->rt_rep-prev.rt_rep),
         (unsigned long long)(s->joins-prev.joins),(unsigned long long)(s->inner_branches-prev.inner_branches),
-        (unsigned long long)(s->splits-prev.splits));
-    prev=*s; prev_native=st.native_us;
+        (unsigned long long)(s->splits-prev.splits),
+        (unsigned long long)(xa-prev_xa),(unsigned long long)(xm-prev_xm),
+        (unsigned long long)(st.native_misses-prev_nm));
+    prev=*s; prev_native=st.native_us; prev_xa=xa; prev_xm=xm; prev_nm=st.native_misses;
     fflush(stdout);
 }
 static void bb_v24_report(void);

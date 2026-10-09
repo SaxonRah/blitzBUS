@@ -1,3 +1,23 @@
+# blitzBUS v38 — XIP counters for the PSRAM question
+
+On top of v37 (your PIC/PIT/IRQ work, unchanged). Pair with blitz86 (j).
+
+* `bb_xip_misses()` read the RP2350 XIP counters as a free-running difference,
+  but `CTR_ACC`/`CTR_HIT` **saturate** at 2^32-1 (~15 s at 300 MHz), so
+  `native-misses` turned to garbage. They are now read-and-cleared on every
+  call and accumulated in 64 bits.
+* The `[bb-jit]` line gains `xip-access=`, `xip-miss=` (both cores, flash +
+  PSRAM) and `native-miss=` (misses while blitz86 code was running) per
+  interval. Side effect: microDOS's own `[xip]` boot statistics read the
+  cleared counters and are no longer meaningful after the live backend starts.
+* `tests/bb_3dbench.c`: `FB_DUMP=file` writes the final mode 13h screen and
+  palette; `-DB86_COND_HISTO` dumps per-site C-call histograms.
+
+Host check: 3DBENCH runs to its score screen with your v37 IRQ code
+(33.3 on qemu, meaningless as a number but proves the timer path).
+
+---
+
 # blitzBUS v0.9 — blitz86 performance pass for 3DBENCH
 
 Requires blitz86 (i) (`b86_jit_set_hot_threshold`, new stats fields).

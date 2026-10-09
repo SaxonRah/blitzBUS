@@ -203,5 +203,16 @@ int main(int argc, char **argv)
         printf("\n");
     }
 #endif
+    if (getenv("FB_DUMP")) {       /* mode 13h screen + RGB565 palette for inspection */
+        extern const uint16_t *bb_vga_palette565(void);
+        FILE *f = fopen(getenv("FB_DUMP"), "wb");
+        if (f) { fwrite(memory + 0xA0000, 1, 64000, f); fwrite(bb_vga_palette565(), 2, 256, f); fclose(f); }
+    }
+#ifdef B86_COND_HISTO
+    { extern uint32_t b86_cond_ip[1<<20], b86_flags_ip[1<<20]; FILE *f=fopen("/tmp/cip.bin","wb"); fwrite(b86_cond_ip,4,1<<20,f); fclose(f);
+      f=fopen("/tmp/fip.bin","wb"); fwrite(b86_flags_ip,4,1<<20,f); fclose(f);
+      { extern uint32_t b86_disp_ip[1<<20], b86_xr[8]; f=fopen("/tmp/dip.bin","wb"); fwrite(b86_disp_ip,4,1<<20,f); fclose(f);
+        printf("[xr] %u %u %u %u %u %u %u %u\n", b86_xr[0],b86_xr[1],b86_xr[2],b86_xr[3],b86_xr[4],b86_xr[5],b86_xr[6],b86_xr[7]); } f=fopen("/tmp/mem2.bin","wb"); fwrite(memory,1,1<<20,f); fclose(f); }
+#endif
     return 0;
 }
