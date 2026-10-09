@@ -207,6 +207,7 @@ int main(int argc, char **argv)
         printf("\n");
     }
 #endif
+    if (getenv("MEM_DUMP")) { FILE *f = fopen(getenv("MEM_DUMP"), "wb"); if (f) { fwrite(memory, 1, 0x100000, f); fclose(f); } }
     if (getenv("FB_DUMP")) {       /* mode 13h screen + RGB565 palette for inspection */
         extern const uint16_t *bb_vga_palette565(void);
         FILE *f = fopen(getenv("FB_DUMP"), "wb");
