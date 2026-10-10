@@ -42,6 +42,8 @@
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 #include "hardware/structs/xip_ctrl.h"
 #include "hardware/watchdog.h"
+#include "pico/multicore.h"
+extern char __StackBottom[], __StackTop[], __StackOneBottom[], __StackOneTop[];   /* v51 */
 #include "hardware/structs/watchdog.h"
 uint64_t bb_now_us(void) { return time_us_64(); }
 /* v38: XIP/QMI cache counters (flash + PSRAM, both cores). The hardware
@@ -557,9 +559,37 @@ static void bb_v33_jit_line(void) {
     fflush(stdout);
 }
 static void bb_v24_report(void);
-static void bb_v33_stats_now(void) { bb_v24_report(); }
+/* v51: a report is ~60 lines; over USB CDC each printf may block while the
+ * host drains, so a burst of Ctrl+] presses could run past the 3 s hang
+ * watchdog (VGA mode) and reset the board mid-run. Pause the watchdog for
+ * the report and ignore presses closer than 1 s apart. */
+static void bb_diag_pause(int pause);
+static void bb_time_freeze(uint64_t us);
+static void bb_v33_stats_now(void)
+{
+    static uint64_t last_us;
+    uint64_t now = bb_now_us();
+    if (last_us && now - last_us < 1000000u) return;
+    bb_diag_pause(1);
+    bb_v24_report();
+    fflush(stdout);
+    bb_diag_pause(0);
+    last_us = bb_now_us();
+    /* v51c: the guest is frozen while the report prints (tens to hundreds of
+       ms over USB). Take that time out of every guest-visible clock, or the
+       BIOS tick jumps and PIT interrupts get coalesced, which throws off
+       3DBENCH's time-based animation (black 3D view) and its fps result. */
+    bb_time_freeze(last_us - now);
+}
 static uint32_t bb_v24_bda_tick(void); /* v34 diagnostic declaration */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+static uint32_t bb_v51_stack_peak(void);
+#endif
 static void bb_v24_report(void) {
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    printf("[bb-v51-stack] core0 peak=%lu of %lu bytes\n", (unsigned long)bb_v51_stack_peak(),
+           (unsigned long)((uintptr_t)__StackTop - (uintptr_t)__StackBottom));
+#endif
     if(!R||!bb_video_seen)return;
     uint64_t elapsed=bb_now_us()-bb_v24_start_us;
     printf("[bb-v24] PROFILE wall-ms=%llu jit-calls=%llu jit-zero=%llu zero-trap=%llu jit-insns=%llu jit-ms=%llu interp-calls=%llu interp-insns=%llu interp-ms=%llu lcd-tick-calls=%llu lcd-tick-ms=%llu hash-calls=%llu hash-ms=%llu bda-tick-start=%lu bda-tick-now=%lu\n",
@@ -780,6 +810,7 @@ static unsigned bb_bbuf_cooldown;
 static uint64_t bb_v40_maps, bb_v40_unmaps, bb_v40_vga_maps;
 static uint32_t bb_v40_slices;
 
+static volatile int bb_v40_vga_pending;
 static void bb_v40_vga_sync(void)
 {
     if (!J) return;
@@ -868,6 +899,7 @@ static void bb_v40_tick(void)
     memset(cnt, 0, sizeof C.rep_page_bytes);
 }
 #else
+static int bb_v40_vga_pending;
 static void bb_v40_vga_sync(void) {}
 static void bb_v40_release(const char *why) { (void)why; }
 static void bb_v40_tick(void) {}
@@ -910,7 +942,7 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
             c->r[B86_CX]=cx; c->r[B86_DX]=dx;
             c->r[B86_BP]=bp; b86_set_seg(c,B86_ES,es);
             b86_set_flags(c,f);
-            bb_v40_vga_sync();                  /* v40: A000 follows the video mode */
+            bb_v40_vga_pending = 1;             /* v51: map/unmap A000 between slices, not inside a block */
             ++st.hook_calls;
             if(bb_video_seen)bb_v7_record(1,(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,
                 (uint16_t)c->seg[B86_SS],(uint16_t)c->r[B86_SP],(uint16_t)c->r[B86_AX],
@@ -1056,7 +1088,7 @@ static int start(MdRuntime *rt)
 #endif
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
-#ifdef BB_V49_PC_PROFILE
+#if defined(BB_V49_PC_PROFILE) && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     bb49_init(clock_get_hz(clk_sys)/BB49_SAMPLE_HZ);
 #endif
 #if !(defined(PICO_ON_DEVICE) && PICO_ON_DEVICE)
@@ -1106,24 +1138,41 @@ void bb_live_set_enabled(int on) { enabled = on; }
 #define BB_DIAG_FAULT 0xB86F0002u
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 static int bb_wd_on;
-/* v45: full fault record in RAM that crt0 does not clear */
-static uint32_t __attribute__((section(".uninitialized_data.bb_fault"))) bb_fault_rec[16];
-#define BB_FAULT_MAGIC 0xB86FA017u
+/* v51: the fault record lives in WATCHDOG SCRATCH0-3 only. Those survive the
+ * handler's watchdog reboot and a BOOTSEL session (the RAM record of v45/v50
+ * did not: the BOOTSEL bootrom reuses SRAM, which is why v50 printed only
+ * the legacy line). SCRATCH4-7 belong to the bootrom's reboot().
+ *   scratch[0] = 0xB86F0000 | v51 | core<<15 | phase<<12 | DEBUGEVT<<11 |
+ *                FORCED<<10 | VECTTBL<<9 | frame-in-stack<<8 | EXC_RETURN[6:0]
+ *   scratch[1] = stacked PC   (0xFFFFFFFF when the frame address is not
+ *                inside that core's stack: the "frame" would be garbage)
+ *   scratch[2] = frame address (MSP/PSP at entry)
+ *   scratch[3] = CFSR
+ * The six v42-v50 reports all had 8-byte-aligned PCs and LR=0x10000000:
+ * that looks like stale stack data, not real exception frames.             */
+#define BB_FAULT_V51 0x00010000u               /* never set by v42-v50 records */
+#define BB_PHASE_BOOT   1u
+#define BB_PHASE_DOS    2u
+#define BB_PHASE_VGA    3u
+#define BB_PHASE_REBOOT 4u                     /* picotool reboot -f: BOOTSEL requested */
+static volatile uint32_t bb_phase = BB_PHASE_BOOT;
+#define BB_STACK_PAINT 0xCDCDCDCDu
+static uint32_t bb_v51_paint_lo;              /* lowest painted core-0 stack word address */
 void bb_fault_c(uint32_t *sf, uint32_t exc_lr)
 {
-    watchdog_hw->scratch[0] = BB_DIAG_FAULT;
-    watchdog_hw->scratch[1] = sf[6];                     /* stacked PC */
-    watchdog_hw->scratch[2] = sf[5];                     /* stacked LR */
-    watchdog_hw->scratch[3] = (*(volatile uint32_t *)0xE000ED28u);   /* CFSR */
-    bb_fault_rec[0] = BB_FAULT_MAGIC;
-    for (int i = 0; i < 8; ++i) bb_fault_rec[1 + i] = sf[i];          /* r0 r1 r2 r3 r12 lr pc xpsr */
-    bb_fault_rec[9]  = *(volatile uint32_t *)0xE000ED2Cu;             /* HFSR */
-    bb_fault_rec[10] = *(volatile uint32_t *)0xE000ED38u;             /* BFAR */
-    bb_fault_rec[11] = *(volatile uint32_t *)0xE000ED34u;             /* MMFAR */
-    bb_fault_rec[12] = *(volatile uint32_t *)0xE000EDE4u;             /* SFSR */
-    bb_fault_rec[13] = *(volatile uint32_t *)0xE000EDE8u;             /* SFAR */
-    bb_fault_rec[14] = exc_lr;
-    bb_fault_rec[15] = (C.seg[B86_CS] << 16) | (C.ip & 0xFFFFu);     /* guest CS:IP at last sync */
+    uint32_t core = *(volatile uint32_t *)0xD0000000u & 1u;            /* SIO CPUID */
+    uint32_t lo = core ? (uint32_t)__StackOneBottom : (uint32_t)__StackBottom;
+    uint32_t hi = core ? (uint32_t)__StackOneTop : (uint32_t)__StackTop;
+    uint32_t fa = (uint32_t)sf;
+    int in_stack = fa >= lo && fa + 32u <= hi && !(fa & 3u);
+    uint32_t hfsr = *(volatile uint32_t *)0xE000ED2Cu;
+    watchdog_hw->scratch[0] = 0xB86F0000u | BB_FAULT_V51 | (core << 15) | ((bb_phase & 7u) << 12) |
+                              (((hfsr >> 31) & 1u) << 11) | (((hfsr >> 30) & 1u) << 10) |
+                              (((hfsr >> 1) & 1u) << 9) | ((uint32_t)in_stack << 8) | (exc_lr & 0x7Fu);
+    watchdog_hw->scratch[1] = in_stack ? sf[6] : 0xFFFFFFFFu;
+    watchdog_hw->scratch[2] = fa;
+    watchdog_hw->scratch[3] = *(volatile uint32_t *)0xE000ED28u;     /* CFSR */
+    if (bb_phase == BB_PHASE_REBOOT) for (;;) {}  /* the bootrom's BOOTSEL reboot is already armed */
     watchdog_reboot(0, 0, 10);
     for (;;) {}
 }
@@ -1137,61 +1186,76 @@ void __attribute__((naked)) isr_hardfault(void)
         "mov r1, lr      \n"
         "b bb_fault_c    \n");
 }
+/* picotool reboot -f -u: the USB reset interface calls reset_usb_boot() from
+ * the USB IRQ while 3DBENCH runs on both cores. Quiesce first (linked with
+ * -Wl,--wrap=reset_usb_boot by install_live.py). */
+extern void __real_reset_usb_boot(uint32_t gpio_mask, uint32_t disable_mask);
+void __wrap_reset_usb_boot(uint32_t gpio_mask, uint32_t disable_mask)
+{
+    bb_phase = BB_PHASE_REBOOT;
+    if (bb_wd_on) { watchdog_disable(); bb_wd_on = 0; }
+    if (get_core_num() == 0) multicore_reset_core1();   /* stop the LCD presenter */
+    __real_reset_usb_boot(gpio_mask, disable_mask);
+    for (;;) {}
+}
+/* v51: core-0 stack high-water mark (painted once at start, below the
+ * current SP with a 256-byte margin) */
+static void bb_v51_paint_stack(void)
+{
+    uint32_t sp; __asm volatile("mov %0, sp" : "=r"(sp));
+    uint32_t lo = ((uint32_t)__StackBottom + 3u) & ~3u, top = (sp - 256u) & ~3u;
+    for (uint32_t a = lo; a < top; a += 4u) *(volatile uint32_t *)a = BB_STACK_PAINT;
+    bb_v51_paint_lo = lo;
+}
+static uint32_t bb_v51_stack_peak(void)
+{
+    if (!bb_v51_paint_lo) return 0;
+    uint32_t a = bb_v51_paint_lo;
+    while (a < (uint32_t)__StackTop && *(volatile uint32_t *)a == BB_STACK_PAINT) a += 4u;
+    return (uint32_t)__StackTop - a;              /* bytes used at the deepest point */
+}
 static void bb_diag_boot_report(void)
 {
     uint32_t m = watchdog_hw->scratch[0];
-    if (m == BB_DIAG_FAULT) {
-        printf("[bb-v42-diag] PREVIOUS RUN HARDFAULT pc=%08lX lr=%08lX cfsr=%08lX\n",
+    static const char *const phases[8] = { "?", "boot", "dos", "vga", "reboot-request", "?", "?", "?" };
+    if ((m & 0xFFFF0000u) == 0xB86F0000u && (m & BB_FAULT_V51)) {
+        uint32_t core = (m >> 15) & 1u, ph = (m >> 12) & 7u, exc = m & 0x7Fu;
+        uint32_t pc = watchdog_hw->scratch[1], fa = watchdog_hw->scratch[2], cfsr = watchdog_hw->scratch[3];
+        uint32_t lo = core ? (uint32_t)__StackOneBottom : (uint32_t)__StackBottom;
+        uint32_t hi = core ? (uint32_t)__StackOneTop : (uint32_t)__StackTop;
+        printf("[bb-v51-fault] PREVIOUS RUN HARDFAULT core=%lu phase=%s hfsr:debugevt=%lu forced=%lu vecttbl=%lu cfsr=%08lX exc-return=..%02lX\n",
+               (unsigned long)core, phases[ph], (unsigned long)((m >> 11) & 1u), (unsigned long)((m >> 10) & 1u),
+               (unsigned long)((m >> 9) & 1u), (unsigned long)cfsr, (unsigned long)exc);
+        printf("[bb-v51-fault] frame=%08lX stack=%08lX..%08lX (%s) stacked-pc=%08lX%s code=%p..%p\n",
+               (unsigned long)fa, (unsigned long)lo, (unsigned long)hi,
+               (m & 0x100u) ? "frame inside the stack" : "FRAME OUTSIDE THE STACK: overflow or corrupt SP",
+               (unsigned long)pc, (m & 0x100u) ? "" : " (not read)", (void *)bb_code, (void *)(bb_code + sizeof bb_code));
+        if (ph == BB_PHASE_REBOOT)
+            printf("[bb-v51-fault] the fault happened while entering BOOTSEL for reflashing, not during the run\n");
+    } else if ((m & 0xFFFF0000u) == 0xB86F0000u) {
+        printf("[bb-v42-diag] PREVIOUS RUN HARDFAULT (pre-v51 record) pc=%08lX lr=%08lX cfsr=%08lX\n",
                (unsigned long)watchdog_hw->scratch[1], (unsigned long)watchdog_hw->scratch[2],
                (unsigned long)watchdog_hw->scratch[3]);
-        if (bb_fault_rec[0] == BB_FAULT_MAGIC)
-            printf("[bb-v45-diag] r0=%08lX r1=%08lX r2=%08lX r3=%08lX r12=%08lX xpsr=%08lX hfsr=%08lX bfar=%08lX mmfar=%08lX sfsr=%08lX sfar=%08lX exc_lr=%08lX guest=%04lX:%04lX code=%p..%p\n",
-                   (unsigned long)bb_fault_rec[1], (unsigned long)bb_fault_rec[2], (unsigned long)bb_fault_rec[3],
-                   (unsigned long)bb_fault_rec[4], (unsigned long)bb_fault_rec[5], (unsigned long)bb_fault_rec[8],
-                   (unsigned long)bb_fault_rec[9], (unsigned long)bb_fault_rec[10], (unsigned long)bb_fault_rec[11],
-                   (unsigned long)bb_fault_rec[12], (unsigned long)bb_fault_rec[13], (unsigned long)bb_fault_rec[14],
-                   (unsigned long)(bb_fault_rec[15] >> 16), (unsigned long)(bb_fault_rec[15] & 0xFFFFu),
-                   (void *)bb_code, (void *)(bb_code + sizeof bb_code));
-        if (bb_fault_rec[0] == BB_FAULT_MAGIC) {
-            const uint32_t cfsr = watchdog_hw->scratch[3];
-            const uint32_t hfsr = bb_fault_rec[9];
-            const uint32_t pc = bb_fault_rec[7];
-            const uintptr_t start = (uintptr_t)bb_code;
-            const uintptr_t end = start + sizeof bb_code;
-            const int in_jit = (uintptr_t)pc >= start && (uintptr_t)pc < end;
-            printf("[bb-v50-fault] stacked-pc=%08lX stacked-lr=%08lX xpsr=%08lX exc-return=%08lX msp-or-psp=not-recorded\n",
-                   (unsigned long)pc, (unsigned long)bb_fault_rec[6],
-                   (unsigned long)bb_fault_rec[8], (unsigned long)bb_fault_rec[14]);
-            printf("[bb-v50-fault] cfsr=%08lX hfsr=%08lX forced=%u vecttbl=%u mmfar-valid=%u bfar-valid=%u\n",
-                   (unsigned long)cfsr, (unsigned long)hfsr,
-                   (unsigned)((hfsr >> 30) & 1u), (unsigned)((hfsr >> 1) & 1u),
-                   (unsigned)((cfsr >> 7) & 1u), (unsigned)((cfsr >> 15) & 1u));
-            printf("[bb-v50-fault] r0=%08lX r1=%08lX r2=%08lX r3=%08lX r12=%08lX\n",
-                   (unsigned long)bb_fault_rec[1], (unsigned long)bb_fault_rec[2],
-                   (unsigned long)bb_fault_rec[3], (unsigned long)bb_fault_rec[4],
-                   (unsigned long)bb_fault_rec[5]);
-            printf("[bb-v50-fault] guest-last-sync=%04lX:%04lX jit-pc=%u jit-offset=%08lX jit-region=%p..%p\n",
-                   (unsigned long)(bb_fault_rec[15] >> 16),
-                   (unsigned long)(bb_fault_rec[15] & 0xFFFFu),
-                   (unsigned)in_jit,
-                   (unsigned long)(in_jit ? (uintptr_t)pc - start : 0u),
-                   (void *)bb_code, (void *)(bb_code + sizeof bb_code));
-            printf("[bb-v50-fault] mmfar=%08lX bfar=%08lX sfsr=%08lX sfar=%08lX (addresses valid only if corresponding status bits set)\n",
-                   (unsigned long)bb_fault_rec[11], (unsigned long)bb_fault_rec[10],
-                   (unsigned long)bb_fault_rec[12], (unsigned long)bb_fault_rec[13]);
-        }
     }
     else if (m == BB_DIAG_ARMED && watchdog_enable_caused_reboot())
         printf("[bb-v42-diag] PREVIOUS RUN HUNG (3 s watchdog) last native slice at guest %04lX:%04lX, slice %lu\n",
                (unsigned long)(watchdog_hw->scratch[3] >> 16), (unsigned long)(watchdog_hw->scratch[3] & 0xFFFFu),
                (unsigned long)watchdog_hw->scratch[1]);
     watchdog_hw->scratch[0] = 0;
-    bb_fault_rec[0] = 0;
     fflush(stdout);
+    bb_v51_paint_stack();
+    bb_phase = BB_PHASE_DOS;
+}
+static void bb_diag_pause(int pause)
+{
+    if (!bb_wd_on) return;
+    if (pause) watchdog_disable();
+    else { watchdog_enable(3000, 1); watchdog_update(); }
 }
 static void bb_diag_slice(void)
 {
     int vga = bb_vga_active();
+    if (bb_phase != BB_PHASE_REBOOT) bb_phase = vga ? BB_PHASE_VGA : BB_PHASE_DOS;
     if (vga && !bb_wd_on) {
         watchdog_hw->scratch[0] = BB_DIAG_ARMED;
         watchdog_hw->scratch[1] = 0;
@@ -1209,9 +1273,17 @@ static void bb_diag_slice(void)
     }
 }
 #else
+static void bb_diag_pause(int pause) { (void)pause; }
 static void bb_diag_boot_report(void) {}
 static void bb_diag_slice(void) {}
 #endif
+static void bb_time_freeze(uint64_t us)
+{
+    if (!us) return;
+    bb_v24_start_us += us;                       /* BIOS tick at 0040:006C */
+    for (unsigned i = 0; i < 3u; ++i) bb_pit.c[i].epoch_us += us;   /* PIT counters */
+    bb_irq36.anchor_us = bb_pit.c[0].epoch_us;   /* keep IRQ0's period count */
+}
 B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
@@ -1232,6 +1304,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
         return 0;
     }
 
+    if (bb_v40_vga_pending) { bb_v40_vga_pending = 0; bb_v40_vga_sync(); }
     bb_v40_tick();
     uint64_t t0 = bb_now_us();
     track_pages();

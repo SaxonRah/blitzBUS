@@ -1,3 +1,42 @@
+# blitzBUS v51 — HardFault investigation: trustworthy records, quiesced reflash
+
+Pair with blitz86 r51 (the user's current tree + no flush on unmap).
+
+Finding: the v42-v50 "PREVIOUS RUN HARDFAULT" records are not real exception
+frames. All six saved PCs are 8-byte aligned (chance ~1/4000 for real Thumb
+PCs) and all carry LR=0x10000000 and CFSR=0. The first one followed a run that
+finished normally (18.8 fps) and was then reflashed with `picotool reboot -f
+-u`, which forces BOOTSEL through the USB reset interface while 3DBENCH is
+still running on both cores. The v50 RAM record never survived because the
+BOOTSEL bootrom reuses SRAM; the watchdog scratch words did.
+
+* Fault record now lives only in WATCHDOG SCRATCH0-3: core, phase (boot / dos /
+  vga / reboot-request), HFSR DEBUGEVT/FORCED/VECTTBL, EXC_RETURN, frame
+  address, whether the frame lies inside that core's stack, stacked PC (only
+  read when the frame is valid), CFSR. Printed as `[bb-v51-fault]`.
+* `reset_usb_boot` is wrapped (-Wl,--wrap): picotool's forced BOOTSEL now
+  marks the phase, disables the hang watchdog and stops core 1 before the
+  bootrom reboot. A fault in that window no longer overwrites the BOOTSEL
+  reboot with its own watchdog reboot.
+* Stacks: PICO_STACK_SIZE and PICO_CORE1_STACK_SIZE 0x800 -> 0x1000 (the
+  whole SCRATCH_Y / SCRATCH_X banks). `[bb-v51-stack] core0 peak=` in every
+  profile report gives the measured high-water mark.
+* A000 map/unmap requested by INT 10h is applied between slices, not inside
+  the hook (with B86_OPT_PAGE_ZERO a map flushes the code cache, which must
+  not happen under the block that called the hook).
+* `blitz_swd_faultcatch/`: OpenOCD HardFault vector catch for a live capture.
+* Host builds: the v49 sampler init is guarded for non-Pico builds.
+* v51b: Ctrl+] reports pause the 3 s hang watchdog while printing (a report
+  is ~60 lines and USB CDC printf can block) and presses closer than 1 s
+  apart are ignored. Measured core-0 stack peak during reports: 2440 bytes,
+  i.e. past the old 2048-byte stack.
+* v51c: the time a Ctrl+] report takes is removed from every guest clock
+  (BIOS tick base, PIT channel epochs, IRQ0 anchor). The guest is frozen
+  while the report prints; before, the BIOS tick jumped and PIT interrupts
+  were coalesced, so spamming Ctrl+] broke 3DBENCH's timing.
+
+---
+
 # blitzBUS v47 — window chooser on a wall clock (pair with blitz86 (p))
 
 * The back-buffer window is evaluated every 250 ms of wall time instead of
