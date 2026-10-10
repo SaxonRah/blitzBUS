@@ -42,6 +42,7 @@
 #endif
 
 #include "hardware/clocks.h"
+#include "hardware/vreg.h"
 #include "hardware/psram.h"
 #include "hardware/structs/xip_ctrl.h"
 #include "pico/stdio_usb.h"
@@ -322,9 +323,27 @@ static bool disk_write(void *user, uint32_t sector, const uint8_t *data, size_t 
 #define MICRODOS_PICO_SYS_KHZ 0
 #endif
 
+#ifndef BB_VREG_MV
+#define BB_VREG_MV 1300
+#endif
+static unsigned bb_vreg_mv_set;
+static void bb_set_vreg_for_clock(uint32_t khz)
+{
+    if (khz <= 200000u || BB_VREG_MV == 0) return;
+    enum vreg_voltage v; unsigned mv;
+    if (BB_VREG_MV <= 1150) { v = VREG_VOLTAGE_1_15; mv = 1150; }
+    else if (BB_VREG_MV <= 1200) { v = VREG_VOLTAGE_1_20; mv = 1200; }
+    else if (BB_VREG_MV <= 1250) { v = VREG_VOLTAGE_1_25; mv = 1250; }
+    else { v = VREG_VOLTAGE_1_30; mv = 1300; }
+    vreg_set_voltage(v);
+    sleep_ms(10);
+    bb_vreg_mv_set = mv;
+}
+
 static bool md_pico_set_clock(void)
 {
 #if MICRODOS_PICO_SYS_KHZ > 0
+    bb_set_vreg_for_clock(MICRODOS_PICO_SYS_KHZ);
     if (!set_sys_clock_khz(MICRODOS_PICO_SYS_KHZ, false)) return false;
     if (psram_configure_params(PICO_DEFAULT_PSRAM_MAX_FREQ, PICO_DEFAULT_PSRAM_MAX_SELECT,
                                PICO_DEFAULT_PSRAM_MIN_DESELECT) != 0) return false;
@@ -989,6 +1008,7 @@ int main(void)
     md_say("\nmicroDOS for Pico 2 (Pimoroni Pico Plus 2)\n");
     md_say("  clk_sys: %lu MHz%s\n",(unsigned long)(clock_get_hz(clk_sys)/1000000u),
            MICRODOS_PICO_SYS_KHZ>0?(clock_ok?" (raised; PSRAM retimed)":" (REQUESTED CLOCK FAILED)"):"");
+    md_say("  vcore:   %u mV%s\n", bb_vreg_mv_set ? bb_vreg_mv_set : 1100u, bb_vreg_mv_set ? " (v53 raised)" : " (default)");
     md_say("  psram:   %lu KiB (sdk available=%d)\n",(unsigned long)(psram_get_size()/1024u),psram_is_available()?1:0);
     if(!md_psram_ok()){md_say("microDOS: PSRAM check failed; halting.\n");for(;;)sleep_ms(1000);}
     md_say("  guest:   %lu KiB at %p (%s, page check ok), DOS memory %lu KiB\n",

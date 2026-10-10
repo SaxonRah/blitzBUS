@@ -36,6 +36,8 @@ def rd32(o, core, addr):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--out', default='faultcatch.txt')
     ap.add_argument('--host', default='127.0.0.1'); ap.add_argument('--port', type=int, default=6666)
+    ap.add_argument('--code-dump', default='', help='also save the JIT code buffer to this .bin file')
+    ap.add_argument('--code-base', default='0x20019040'); ap.add_argument('--code-end', default='0x20062040')
     a = ap.parse_args(); o = OpenOCD(a.host, a.port); log = open(a.out, 'a', encoding='utf-8')
     def w(s): print(s); log.write(s + '\n'); log.flush()
     w(f'=== faultcatch {datetime.datetime.now().isoformat()} ===')
@@ -58,9 +60,16 @@ def main():
                 if sp:
                     w(f'frame at sp=0x{sp:08x}:'); w(o.call(f'{c} mdw 0x{sp:08x} 8'))
                     pc = rd32(o, c, sp + 24)
+                    lr = rd32(o, c, sp + 20)
+                    w(f'stacked lr=0x{lr:08x}' if lr is not None else 'stacked lr=?')
                     if pc:
                         w(f'stacked pc=0x{pc:08x}; bytes around it:')
-                        w(o.call(f'{c} mdb 0x{(pc & ~1) - 32:08x} 96'))
+                        w(o.call(f'{c} mdb 0x{(pc & ~1) - 256:08x} 384'))
+                    w('stack (64 words):'); w(o.call(f'{c} mdw 0x{sp:08x} 64'))
+                if a.code_dump:
+                    b0, b1 = int(a.code_base, 16), int(a.code_end, 16)
+                    w(o.call(f'{c} dump_image {a.code_dump} 0x{b0:08x} 0x{b1 - b0:x}').strip())
+                    w(f'code buffer 0x{b0:08x}..0x{b1:08x} saved to {a.code_dump}')
                 w('core left halted for inspection (resume manually in telnet: resume)')
                 return
             time.sleep(0.2)

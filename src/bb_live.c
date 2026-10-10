@@ -131,6 +131,7 @@ void bb_meta_free(void *p) { (void)p; }
 static B86Cpu C;
 static void bb_diag_boot_report(void);   /* v42 */
 static struct B86Jit *J;
+const uint8_t *bb_live_code(size_t *n) { *n = sizeof bb_code; return bb_code; }
 static MdRuntime *R;
 static uint16_t bios_seg;
 static int enabled = 1, failed = 0;

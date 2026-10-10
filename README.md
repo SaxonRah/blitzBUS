@@ -30,6 +30,14 @@ BOOTSEL bootrom reuses SRAM; the watchdog scratch words did.
   is ~60 lines and USB CDC printf can block) and presses closer than 1 s
   apart are ignored. Measured core-0 stack peak during reports: 2440 bytes,
   i.e. past the old 2048-byte stack.
+* Host profiler (Phase 0): `PROF=out.txt` on tests/bb_3dbench samples the ARM
+  PC with SIGPROF (qemu-user) and resolves JIT blocks at sample time; build
+  with -DB86_HELPER_HISTO for helper opcode/site histograms.
+* v53: core voltage raised to 1.30 V before the 300 MHz clock change
+  (installer env BB_VREG_MV=1150/1200/1250/1300, 0 = leave default). SWD fault
+  capture showed deterministic HardFaults at 1.10 V: an LDR [r9, lr, LSL #2]
+  directly after UBFX lr used the UBFX input register as its index, always
+  at a 16-byte aligned PC. The boot banner prints "vcore:".
 * v51c: the time a Ctrl+] report takes is removed from every guest clock
   (BIOS tick base, PIT channel epochs, IRQ0 anchor). The guest is frozen
   while the report prints; before, the BIOS tick jumped and PIT interrupts

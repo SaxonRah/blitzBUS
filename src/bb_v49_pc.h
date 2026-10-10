@@ -9,7 +9,7 @@
 #if defined(PICO_RP2350) && defined(__arm__) && !defined(__riscv)
 #define BB49_COUNT 1024u
 #ifndef BB49_SAMPLE_HZ
-#define BB49_SAMPLE_HZ 100u
+#define BB49_SAMPLE_HZ 500u   /* v52: 500 Hz (ring 1024 = ~2 s between reports) */
 #endif
 static volatile uint32_t bb49_pc[BB49_COUNT];
 static volatile uint32_t bb49_seq;
@@ -143,6 +143,20 @@ static void bb49_report(struct B86Jit *jit) {
         if(found==24){unsigned lo=0;for(unsigned j=1;j<24;j++)if(top[j].count<top[lo].count)lo=j;top[lo].count--;continue;}
         if(!top[found].count){top[found].key=key;top[found].host=offset;}
         top[found].count++;
+    }
+    /* v52: every sample, unbiased: JIT samples counted, all other PCs listed
+       (scripts/bb_pc_report.ps1 resolves them to functions) */
+    {
+        uint32_t njit=0, n=0; char line[16*9+48]; int len=0;
+        for(uint32_t i=first;i<stop;i++){
+            uint32_t pc=bb49_pc[i&(BB49_COUNT-1u)]&~1u, k2, o2;
+            if(b86_jit_pc_lookup(jit,(uintptr_t)pc,&k2,&o2)){njit++;continue;}
+            if(!n) len=snprintf(line,sizeof line,"[bb-v52-pcs]");
+            len+=snprintf(line+len,sizeof line-len," %08lX",(unsigned long)pc);
+            if(++n==16){puts(line);n=0;}
+        }
+        if(n)puts(line);
+        printf("[bb-v52-jit] samples=%lu\n",(unsigned long)njit);
     }
     bb49_previous=stop;
     __asm volatile("dmb sy" ::: "memory");

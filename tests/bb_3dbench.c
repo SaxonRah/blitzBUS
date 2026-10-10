@@ -14,6 +14,24 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
+#include <sys/time.h>
+#include <ucontext.h>
+/* PROF=1: SIGPROF sampling of the ARM PC (qemu-user delivers guest state) */
+#define PROF_MAX (1u << 20)
+static uint32_t prof_pc[PROF_MAX], prof_key[PROF_MAX], prof_off[PROF_MAX];
+static volatile uint32_t prof_n;
+struct B86Jit *bb_live_jit(void);
+static void prof_sig(int sig, siginfo_t *si, void *uc_)
+{
+    (void)sig; (void)si;
+    ucontext_t *uc = uc_;
+    if (prof_n >= PROF_MAX) return;
+    uint32_t pc = (uint32_t)uc->uc_mcontext.arm_pc, key = 0, off = ~0u;
+    if (bb_live_jit() && !b86_jit_pc_lookup(bb_live_jit(), pc, &key, &off)) off = ~0u;
+    prof_pc[prof_n] = pc; prof_key[prof_n] = key; prof_off[prof_n] = off; prof_n++;
+}
+const uint8_t *bb_live_code(size_t *n);
 
 #define OUT_MAX (256u * 1024u)
 #ifndef BUDGET
@@ -100,6 +118,13 @@ static uint8_t *load(const char *path, size_t *size)
 
 int main(int argc, char **argv)
 {
+    if (getenv("PROF")) {
+        struct sigaction sa; memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = prof_sig; sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigaction(SIGPROF, &sa, NULL);
+        struct itimerval it = { { 0, 200 }, { 0, 200 } };
+        setitimer(ITIMER_PROF, &it, NULL);
+    }
     static E2e e;
     static MdDos2System sys;
     size_t ksz = 0;
@@ -203,10 +228,31 @@ int main(int argc, char **argv)
         printf("\n");
         extern uint64_t b86_helper_histo2[32];
         printf("[e2e] D0/D1 by w,reg:"); for (int i = 0; i < 16; ++i) if (b86_helper_histo2[i]) printf(" w%d/%d:%llu", i / 8, i % 8, (unsigned long long)b86_helper_histo2[i]);
+        { extern uint32_t b86_helper_ip[1<<20];
+          printf("[e2e] top helper sites:");
+          for (int n = 0; n < 12; ++n) { uint32_t bi = 0; for (uint32_t i = 1; i < (1u<<20); ++i) if (b86_helper_ip[i] > b86_helper_ip[bi]) bi = i;
+              if (!b86_helper_ip[bi]) break;
+              printf(" %05X[%02X %02X %02X]:%u", bi, memory[bi], memory[bi+1], memory[bi+2], b86_helper_ip[bi]); b86_helper_ip[bi] = 0; }
+          printf("\n"); }
         printf("\n[e2e] F6/F7 by w,reg:"); for (int i = 16; i < 32; ++i) if (b86_helper_histo2[i]) printf(" w%d/%d:%llu", (i - 16) / 8, i % 8, (unsigned long long)b86_helper_histo2[i]);
         printf("\n");
     }
 #endif
+    if (getenv("PROF")) {
+        struct itimerval z = { { 0, 0 }, { 0, 0 } }; setitimer(ITIMER_PROF, &z, NULL);
+        size_t cn; const uint8_t *code = bb_live_code(&cn);
+        FILE *f = fopen(getenv("PROF"), "wb");
+        if (f) {
+            for (uint32_t i = 0; i < prof_n; ++i) {
+                uint32_t pc = prof_pc[i] & ~1u, key = prof_key[i], off = prof_off[i], kind = 0;
+                if (off != ~0u) kind = 1;
+                else if (pc >= (uint32_t)(uintptr_t)code && pc < (uint32_t)(uintptr_t)code + cn) kind = 2;
+                fprintf(f, "%08x %u %08x %u\n", pc, kind, key, off);
+            }
+            fclose(f);
+            fprintf(stderr, "[prof] %u samples\n", prof_n);
+        }
+    }
     if (getenv("MEM_DUMP")) { FILE *f = fopen(getenv("MEM_DUMP"), "wb"); if (f) { fwrite(memory, 1, 0x100000, f); fclose(f); } }
     if (getenv("FB_DUMP")) {       /* mode 13h screen + RGB565 palette for inspection */
         extern const uint16_t *bb_vga_palette565(void);

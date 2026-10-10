@@ -130,6 +130,44 @@ def main():
     # Guard against the escaped-newline regression before emitting generated C.
     if r';\n            md_say' in pico_text:
         raise SystemExit('Literal escaped newlines found in generated C')
+    # v53: raise the core voltage before the 300 MHz clock change. At the
+    # default 1.10 V the RP2350 faulted deterministically (LDR right after
+    # UBFX used the UBFX *input* as its index, always at a 16-byte aligned PC).
+    clk_anchor='''static bool md_pico_set_clock(void)
+{
+#if MICRODOS_PICO_SYS_KHZ > 0
+    if (!set_sys_clock_khz(MICRODOS_PICO_SYS_KHZ, false)) return false;'''
+    if pico_text.count(clk_anchor)!=1:
+        raise SystemExit('v53 clock anchor changed; originals untouched')
+    vreg_mv=os.environ.get("BB_VREG_MV","1300")
+    pico_text=pico_text.replace('#include "hardware/clocks.h"\n','#include "hardware/clocks.h"\n#include "hardware/vreg.h"\n',1)
+    pico_text=pico_text.replace(clk_anchor,'''#ifndef BB_VREG_MV
+#define BB_VREG_MV '''+vreg_mv+'''
+#endif
+static unsigned bb_vreg_mv_set;
+static void bb_set_vreg_for_clock(uint32_t khz)
+{
+    if (khz <= 200000u || BB_VREG_MV == 0) return;
+    enum vreg_voltage v; unsigned mv;
+    if (BB_VREG_MV <= 1150) { v = VREG_VOLTAGE_1_15; mv = 1150; }
+    else if (BB_VREG_MV <= 1200) { v = VREG_VOLTAGE_1_20; mv = 1200; }
+    else if (BB_VREG_MV <= 1250) { v = VREG_VOLTAGE_1_25; mv = 1250; }
+    else { v = VREG_VOLTAGE_1_30; mv = 1300; }
+    vreg_set_voltage(v);
+    sleep_ms(10);
+    bb_vreg_mv_set = mv;
+}
+
+static bool md_pico_set_clock(void)
+{
+#if MICRODOS_PICO_SYS_KHZ > 0
+    bb_set_vreg_for_clock(MICRODOS_PICO_SYS_KHZ);
+    if (!set_sys_clock_khz(MICRODOS_PICO_SYS_KHZ, false)) return false;''',1)
+    psram_say='''    md_say("  psram:   %lu KiB'''
+    if pico_text.count(psram_say)!=1:
+        raise SystemExit('v53 psram line changed; originals untouched')
+    pico_text=pico_text.replace(psram_say,'''    md_say("  vcore:   %u mV%s\\n", bb_vreg_mv_set ? bb_vreg_mv_set : 1100u, bb_vreg_mv_set ? " (v53 raised)" : " (default)");
+'''+psram_say,1)
     gen=root/'generated'; gen.mkdir(exist_ok=True)
     (gen/'bb_md_dos2_system.c').write_text(sys_text,encoding='utf8')
     (gen/'bb_microdos_pico.c').write_text(pico_text,encoding='utf8')
