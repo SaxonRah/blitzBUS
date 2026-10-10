@@ -1057,7 +1057,7 @@ static int start(MdRuntime *rt)
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
 #ifdef BB_V49_PC_PROFILE
-    bb49_init(clock_get_hz(clk_sys)/BB49_SAMPLE_HZ);
+    bb49_init(clock_get_hz(clk_sys)/1000u);
 #endif
 #if !(defined(PICO_ON_DEVICE) && PICO_ON_DEVICE)
     bb_shadow = aligned_alloc(64, (B86_MEM_BYTES + 63u) & ~63u);
@@ -1152,34 +1152,6 @@ static void bb_diag_boot_report(void)
                    (unsigned long)bb_fault_rec[12], (unsigned long)bb_fault_rec[13], (unsigned long)bb_fault_rec[14],
                    (unsigned long)(bb_fault_rec[15] >> 16), (unsigned long)(bb_fault_rec[15] & 0xFFFFu),
                    (void *)bb_code, (void *)(bb_code + sizeof bb_code));
-        if (bb_fault_rec[0] == BB_FAULT_MAGIC) {
-            const uint32_t cfsr = watchdog_hw->scratch[3];
-            const uint32_t hfsr = bb_fault_rec[9];
-            const uint32_t pc = bb_fault_rec[7];
-            const uintptr_t start = (uintptr_t)bb_code;
-            const uintptr_t end = start + sizeof bb_code;
-            const int in_jit = (uintptr_t)pc >= start && (uintptr_t)pc < end;
-            printf("[bb-v50-fault] stacked-pc=%08lX stacked-lr=%08lX xpsr=%08lX exc-return=%08lX msp-or-psp=not-recorded\n",
-                   (unsigned long)pc, (unsigned long)bb_fault_rec[6],
-                   (unsigned long)bb_fault_rec[8], (unsigned long)bb_fault_rec[14]);
-            printf("[bb-v50-fault] cfsr=%08lX hfsr=%08lX forced=%u vecttbl=%u mmfar-valid=%u bfar-valid=%u\n",
-                   (unsigned long)cfsr, (unsigned long)hfsr,
-                   (unsigned)((hfsr >> 30) & 1u), (unsigned)((hfsr >> 1) & 1u),
-                   (unsigned)((cfsr >> 7) & 1u), (unsigned)((cfsr >> 15) & 1u));
-            printf("[bb-v50-fault] r0=%08lX r1=%08lX r2=%08lX r3=%08lX r12=%08lX\n",
-                   (unsigned long)bb_fault_rec[1], (unsigned long)bb_fault_rec[2],
-                   (unsigned long)bb_fault_rec[3], (unsigned long)bb_fault_rec[4],
-                   (unsigned long)bb_fault_rec[5]);
-            printf("[bb-v50-fault] guest-last-sync=%04lX:%04lX jit-pc=%u jit-offset=%08lX jit-region=%p..%p\n",
-                   (unsigned long)(bb_fault_rec[15] >> 16),
-                   (unsigned long)(bb_fault_rec[15] & 0xFFFFu),
-                   (unsigned)in_jit,
-                   (unsigned long)(in_jit ? (uintptr_t)pc - start : 0u),
-                   (void *)bb_code, (void *)(bb_code + sizeof bb_code));
-            printf("[bb-v50-fault] mmfar=%08lX bfar=%08lX sfsr=%08lX sfar=%08lX (addresses valid only if corresponding status bits set)\n",
-                   (unsigned long)bb_fault_rec[11], (unsigned long)bb_fault_rec[10],
-                   (unsigned long)bb_fault_rec[12], (unsigned long)bb_fault_rec[13]);
-        }
     }
     else if (m == BB_DIAG_ARMED && watchdog_enable_caused_reboot())
         printf("[bb-v42-diag] PREVIOUS RUN HUNG (3 s watchdog) last native slice at guest %04lX:%04lX, slice %lu\n",
