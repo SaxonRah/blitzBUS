@@ -23,7 +23,7 @@
 #include "bb_lcd_console.h"
 #endif
 #include "b86.h"
-#define BB_V49_PC_PROFILE 1 /* v49 installer opt-in; remove to disable */
+// #define BB_V49_PC_PROFILE 1 /* v49 installer opt-in; remove to disable */
 #include "bb_v49_pc.h"
 #include "msdos2_boot.h"
 #include <string.h>
