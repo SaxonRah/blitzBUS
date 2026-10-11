@@ -23,7 +23,9 @@
 #include "bb_lcd_console.h"
 #endif
 #include "b86.h"
-// #define BB_V49_PC_PROFILE 1 /* v49 installer opt-in; remove to disable */
+#if defined(BB_PC_PROFILE) && BB_PC_PROFILE
+#define BB_V49_PC_PROFILE 1 /* v58: installer env BB_PC_PROFILE=1 enables the PC sampler */
+#endif
 #include "bb_v49_pc.h"
 #include "msdos2_boot.h"
 #include <string.h>
@@ -113,7 +115,7 @@ static const char *fail_reason = "none";
    used by the dispatcher: keep it in PSRAM, SRAM goes to the code buffer.
    Build with -DB86_CALLOC=bb_meta_calloc -DB86_FREE=bb_meta_free. */
 #ifndef BB_META_BYTES
-#define BB_META_BYTES (768u * 1024u)   /* + blitz86 join bitmaps (2 x 136 KiB) and heat table */
+#define BB_META_BYTES (1024u * 1024u)  /* + join bitmaps (2 x 136 KiB), heat table, r52 eviction patch log (64 KiB) */
 #endif
 static uint8_t __uninitialized_psram("bb_meta") bb_meta[BB_META_BYTES] __attribute__((aligned(16)));
 static size_t bb_meta_used;
@@ -544,7 +546,8 @@ static void bb_v33_jit_line(void) {
     const B86JitStats *s=b86_jit_stats(J);
     printf("[bb-jit] native-ms=%llu translate-ms=%llu flushes=%llu blocks=%llu cold-insns=%llu "
            "rt-step=%llu rt-cond=%llu rt-flags=%llu rt-light=%llu rt-smc=%llu rt-rep=%llu "
-           "joins=%llu inner=%llu splits=%llu xip-access=%llu xip-miss=%llu native-miss=%llu\n",
+           "joins=%llu inner=%llu splits=%llu xip-access=%llu xip-miss=%llu native-miss=%llu "
+           "evictions=%llu evicted=%llu unchains=%llu retries=%llu\n",
         (unsigned long long)((st.native_us-prev_native)/1000u),
         (unsigned long long)((s->translate_us-prev.translate_us)/1000u),
         (unsigned long long)(s->flushes-prev.flushes),(unsigned long long)(s->blocks-prev.blocks),
@@ -555,7 +558,10 @@ static void bb_v33_jit_line(void) {
         (unsigned long long)(s->joins-prev.joins),(unsigned long long)(s->inner_branches-prev.inner_branches),
         (unsigned long long)(s->splits-prev.splits),
         (unsigned long long)(xa-prev_xa),(unsigned long long)(xm-prev_xm),
-        (unsigned long long)(st.native_misses-prev_nm));
+        (unsigned long long)(st.native_misses-prev_nm),
+        (unsigned long long)(s->evictions-prev.evictions),(unsigned long long)(s->evicted_blocks-prev.evicted_blocks),
+        (unsigned long long)(s->unchains-prev.unchains),
+        (unsigned long long)(s->limit_retries-prev.limit_retries));
     prev=*s; prev_native=st.native_us; prev_xa=xa; prev_xm=xm; prev_nm=st.native_misses;
     fflush(stdout);
 }
@@ -1089,6 +1095,14 @@ static int start(MdRuntime *rt)
 #endif
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    printf("[bb-r52] code-cache %u KiB, %s, meta-used=%u of %u KiB\n", (unsigned)(BB_CODE_BYTES/1024u),
+           b86_jit_evict_enabled(J) ? "region eviction" : "whole-cache flush",
+           (unsigned)(bb_meta_used/1024u), (unsigned)(BB_META_BYTES/1024u));
+#else
+    printf("[bb-r52] code-cache %u KiB, %s\n", (unsigned)(BB_CODE_BYTES/1024u),
+           b86_jit_evict_enabled(J) ? "region eviction" : "whole-cache flush");
+#endif
 #if defined(BB_V49_PC_PROFILE) && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     bb49_init(clock_get_hz(clk_sys)/BB49_SAMPLE_HZ);
 #endif
@@ -1113,7 +1127,7 @@ static int start(MdRuntime *rt)
        a program's hot loops resident in the SRAM code buffer instead of
        flushing it every frame (3DBENCH: 20-100 flushes per 10M insns -> 0-1). */
 #ifndef BB_HOT_THRESHOLD
-#define BB_HOT_THRESHOLD 128u
+#define BB_HOT_THRESHOLD 64u   /* v58: 64 = 45.4 fps without slowdowns */
 #endif
     b86_jit_set_hot_threshold(J, BB_HOT_THRESHOLD);
 #if MICRODOS_TRANSLATION_SUPPORT

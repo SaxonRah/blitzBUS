@@ -16,13 +16,19 @@ def main():
     if lcd_lace not in ("0","1"):
         raise SystemExit("BB_LCD_LACE must be 0 (full) or 1 (alternating rows)")
     lcd_peri=os.environ.get("BB_LCD_PERI_HZ","150000000")
-    hot=os.environ.get("BB_HOT_THRESHOLD","128")
+    hot=os.environ.get("BB_HOT_THRESHOLD","64")   # v58: 64 = 45.4 fps, no slowdowns
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
     paged=os.environ.get("BB_PAGED","1")
     if paged not in ("0","1"):
         raise SystemExit("BB_PAGED must be 0 or 1 (v40 SRAM-backed guest pages)")
     bbuf=os.environ.get("BB_BBUF","1")
+    pc_prof=os.environ.get("BB_PC_PROFILE","0")
+    if pc_prof not in ("0","1"):
+        raise SystemExit("BB_PC_PROFILE must be 0 or 1 (500 Hz PC sampler)")
+    tv_sram=os.environ.get("BB_TV_SRAM","0")
+    if tv_sram not in ("0","1"):
+        raise SystemExit("BB_TV_SRAM must be 0 or 1 (r52b translator scratch in SRAM)")
     if bbuf not in ("0","1"):
         raise SystemExit("BB_BBUF must be 0 or 1 (64 KiB SRAM back-buffer window)")
     code_kb=os.environ.get("BB_CODE_KB",("232" if bbuf=="1" else "240") if paged=="1" else "192")
@@ -201,7 +207,7 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
-    B86_RAM_FUNCS=1
+    B86_RAM_FUNCS=1 B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}
     PICO_STACK_SIZE=0x1000 PICO_CORE1_STACK_SIZE=0x1000
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1

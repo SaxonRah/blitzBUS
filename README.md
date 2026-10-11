@@ -33,6 +33,19 @@ BOOTSEL bootrom reuses SRAM; the watchdog scratch words did.
 * Host profiler (Phase 0): `PROF=out.txt` on tests/bb_3dbench samples the ARM
   PC with SIGPROF (qemu-user) and resolves JIT blocks at sample time; build
   with -DB86_HELPER_HISTO for helper opcode/site histograms.
+* v58: default BB_HOT_THRESHOLD 64 (Pico sweep: 32 = 45.4 with slowdowns,
+  48 = 45.4 fewer, 64 = 45.4 smooth, 96 = 41.6). BB_PC_PROFILE=1 turns the
+  500 Hz PC sampler back on for a profiling build (off by default).
+* v57: needs blitz86 r52d (mapping the back buffer no longer flushes the
+  JIT when B86_OPT_PAGE_ZERO is on).
+* v56: needs blitz86 r52c. [bb-jit] adds retries= (oversized translation
+  attempts redone without a full flush - the 3DBENCH hiccup at threshold 32).
+* v55: default BB_HOT_THRESHOLD 128 -> 32 (with r52 eviction: 43.4 fps,
+  232 KiB cache + back-buffer window). BB_TV_SRAM=1 (opt-in) puts blitz86's
+  translator scratch (7 KiB) in SRAM instead of PSRAM (blitz86 r52b).
+* v54: needs blitz86 r52 (region eviction). The [bb-jit] line adds
+  evictions/evicted/unchains; boot prints "[bb-r52] code-cache ..., region
+  eviction". PSRAM metadata pool 768 -> 1024 KiB (patch log).
 * v53: core voltage raised to 1.30 V before the 300 MHz clock change
   (installer env BB_VREG_MV=1150/1200/1250/1300, 0 = leave default). SWD fault
   capture showed deterministic HardFaults at 1.10 V: an LDR [r9, lr, LSL #2]

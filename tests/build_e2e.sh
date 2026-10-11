@@ -15,7 +15,7 @@ SRC="$OUT/bb_md_dos2_system.c $MD/src/host/msdos2_boot.c \
 INC="-I$HERE/src -I$B/include -I$MD/include -I$MD/src/runtime -I$MD/src/system -I$MD/src/host"
 DEF="-DB86_RAM_FUNCS=1 -DB86_NOW=bb_now_us -DBLITZBUS_LIVE_BACKEND=1 -DMD_THREADED_DISPATCH=1 -DMICRODOS_SYSTEM_ENABLE_AOT=0 -DMICRODOS_SYSTEM_ENABLE_CACHE=0"
 FL="-O2 -static -std=gnu11 -w"
-arm-linux-gnueabihf-gcc $FL -mthumb -march=armv7-a+fp $DEF -DB86_MAXB=2048 -DB86_MAP_BITS=12 -DB86_FAST_BITS=10 \
+arm-linux-gnueabihf-gcc $FL -mthumb -march=armv7-a+fp $DEF $E2E_EXTRA -DB86_MAXB=2048 -DB86_MAP_BITS=12 -DB86_FAST_BITS=10 \
     $INC $SRC $B/src/be_t2.c -o "$OUT/bb_dos_e2e_t2"
 aarch64-linux-gnu-gcc $FL $DEF $INC $SRC $B/src/be_a64.c -o "$OUT/bb_dos_e2e_a64"
 echo "built $OUT/bb_dos_e2e_t2 $OUT/bb_dos_e2e_a64"
