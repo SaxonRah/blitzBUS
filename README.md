@@ -33,6 +33,24 @@ BOOTSEL bootrom reuses SRAM; the watchdog scratch words did.
 * Host profiler (Phase 0): `PROF=out.txt` on tests/bb_3dbench samples the ARM
   PC with SIGPROF (qemu-user) and resolves JIT blocks at sample time; build
   with -DB86_HELPER_HISTO for helper opcode/site histograms.
+* v62: [bb-v62-bench] reports when rendering stopped (last frame copy into
+  A000), which is the benchmark time; the v61 end marker measured until the
+  program exits (after the keypress). [bb-v62-vec] logs INT 21h get/set
+  vector calls. BB_PIN_PAGES is NOT safe yet: 3DBENCH keeps its saved
+  interrupt vectors in page 16000 and restored garbage at exit (crash).
+* v61: [bb-v61-bench] prints the exact wall time of a benchmark run (from the
+  program's PIT channel 0 reprogram to the next port-43h write or leaving
+  mode 13h). 3DBENCH reports 1000/(tenths of a second), so changes under ~5%
+  only show here.
+* v60: BB_PIN_PAGES="16,1C" keeps those 4 KiB guest data pages in SRAM
+  while mode 13h is up (copied back before microDOS touches memory, never in
+  the stack segment). Up to 8; beyond 8 KiB of them the default code cache
+  shrinks. Off by default.
+* v59: BB_MISS_PROFILE=1 builds blitz86 with -DB86_MPROF and prints
+  [bb-v59-miss] every interval: cache misses / accesses / ms per category
+  (cold, step, rep, cond, smc, light, translate), the remainder inside the
+  native window ("code" = generated code + dispatcher) and "outside" (rest of
+  core 0 and all of core 1). Requires blitz86 r52g.
 * v58: default BB_HOT_THRESHOLD 64 (Pico sweep: 32 = 45.4 with slowdowns,
   48 = 45.4 fewer, 64 = 45.4 smooth, 96 = 41.6). BB_PC_PROFILE=1 turns the
   500 Hz PC sampler back on for a profiling build (off by default).

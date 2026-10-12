@@ -533,6 +533,9 @@ static uint64_t bb_v24_start_us,bb_v24_jit_us,bb_v24_lcd_us,bb_v24_hash_us;
 static uint64_t bb_v24_jit_calls,bb_v24_zero,bb_v24_zero_trap,bb_v24_jit_insns;
 static uint64_t bb_v24_lcd_calls,bb_v24_hash_calls,bb_v24_interp_us;
 static uint32_t bb_v24_start_bda_tick,bb_v24_last_bda_tick;
+static uint64_t bb_v61_t0;                   /* v61: timed run start (0: none) */
+static uint64_t bb_v61_last_frame_us, bb_v61_a000_bytes, bb_v61_a000_last;
+static int bb_v61_render_reported;
 static uint64_t bb_v25_last_lcd_us;
 static uint64_t bb_v25_lcd_skipped;
 static uint32_t bb_v25_timer_updates;
@@ -562,6 +565,31 @@ static void bb_v33_jit_line(void) {
         (unsigned long long)(s->evictions-prev.evictions),(unsigned long long)(s->evicted_blocks-prev.evicted_blocks),
         (unsigned long long)(s->unchains-prev.unchains),
         (unsigned long long)(s->limit_retries-prev.limit_retries));
+#if defined(BB_MISS_PROFILE) && BB_MISS_PROFILE
+    /* v59: where the cache misses come from (blitz86 -DB86_MPROF). "code" is
+       generated code plus the dispatcher: the native window minus the
+       profiled categories and translation. "outside" is everything else
+       on core 0 plus all of core 1 (the counters are shared). */
+    {
+        static const char *const nm[6] = { "cold", "step", "rep", "cond", "smc", "light" };
+        uint64_t cm = 0, ca = 0, cu = 0;
+        char buf[400]; int n = 0;
+        for (int i = 0; i < 6; ++i) {
+            uint64_t m = s->mp_miss[i] - prev.mp_miss[i], a2 = s->mp_acc[i] - prev.mp_acc[i], u = s->mp_us[i] - prev.mp_us[i];
+            cm += m; ca += a2; cu += u;
+            n += snprintf(buf + n, sizeof buf - (size_t)n, " %s=%llu/%llu/%llu", nm[i],
+                          (unsigned long long)m, (unsigned long long)a2, (unsigned long long)(u / 1000u));
+        }
+        uint64_t tm = s->translate_misses - prev.translate_misses, tu = (s->translate_us - prev.translate_us);
+        uint64_t nmiss = st.native_misses - prev_nm, nus = st.native_us - prev_native;
+        uint64_t code_m = nmiss > cm + tm ? nmiss - cm - tm : 0, code_u = nus > cu + tu ? nus - cu - tu : 0;
+        printf("[bb-v59-miss] misses/accesses/ms:%s translate=%llu/-/%llu code=%llu/-/%llu outside=%llu/-/- total-miss=%llu total-acc=%llu\n",
+               buf, (unsigned long long)tm, (unsigned long long)(tu / 1000u),
+               (unsigned long long)code_m, (unsigned long long)(code_u / 1000u),
+               (unsigned long long)(xm - prev_xm > nmiss ? xm - prev_xm - nmiss : 0),
+               (unsigned long long)(xm - prev_xm), (unsigned long long)(xa - prev_xa));
+    }
+#endif
     prev=*s; prev_native=st.native_us; prev_xa=xa; prev_xm=xm; prev_nm=st.native_misses;
     fflush(stdout);
 }
@@ -818,6 +846,7 @@ static uint64_t bb_v40_maps, bb_v40_unmaps, bb_v40_vga_maps;
 static uint32_t bb_v40_slices;
 
 static volatile int bb_v40_vga_pending;
+static void bb_v61_end(const char *why);
 static void bb_v40_vga_sync(void)
 {
     if (!J) return;
@@ -833,15 +862,80 @@ static void bb_v40_vga_sync(void)
             bb_vram_mapped = -1;              /* do not retry every INT 10h */
         }
     } else if (!want && bb_vram_mapped == 1) {
+        bb_v61_end("left mode 13h");
         bb_vga_set_vram(NULL);
         b86_unmap_range(&C, 0xA0000u, BB_WIN_BYTES);
         bb_vram_mapped = 0;
         printf("[bb-v40-paged] A000 window back to PSRAM\n"); fflush(stdout);
     }
 }
+/* v60: pinned data pages. BB_PIN_LIST (installer env BB_PIN_PAGES) names
+   4 KiB guest pages (linear >> 12) to keep in SRAM while mode 13h is up,
+   for programs whose hot data the cache cannot hold. Same coherence rules
+   as the back buffer: copied back before microDOS touches guest memory,
+   never inside the current stack segment (stack accesses skip the page
+   table). Frames are packed with a 64-byte gap, so a word access
+   straddling a pinned page's last byte loses its second byte into the gap
+   (the same accepted limit as the other windows). */
+#ifndef BB_PIN_N
+#define BB_PIN_N 0
+#endif
+#if BB_PIN_N
+static const uint16_t bb_pin_pages[BB_PIN_N] = { BB_PIN_LIST };
+#define BB_PIN_STRIDE (4096u + 64u)
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+static uint8_t bb_pin_frames[BB_PIN_N * BB_PIN_STRIDE] __attribute__((aligned(64)));
+#define bb_pin_frame(i) (bb_pin_frames + (i) * BB_PIN_STRIDE)
+#else
+#define bb_pin_frame(i) (bb_host_frames() + 0x50000u + (i) * BB_PIN_STRIDE)
+#endif
+static uint32_t bb_pin_mask;
+static unsigned bb_pin_cooldown;
+static uint64_t bb_pin_maps, bb_pin_unmaps;
+static void bb_v60_pin_release(const char *why)
+{
+    if (!bb_pin_mask) return;
+    for (unsigned i = 0; i < BB_PIN_N; ++i)
+        if (bb_pin_mask & (1u << i)) b86_unmap_range(&C, (uint32_t)bb_pin_pages[i] << 12, 4096u);
+    if (++bb_pin_unmaps <= 8u) { printf("[bb-v60-pin] pinned pages back to PSRAM (%s)\n", why); fflush(stdout); }
+    bb_pin_mask = 0;
+    bb_pin_cooldown = 2u;
+}
+static void bb_v60_pin_tick(uint32_t ss_lo, uint32_t ss_hi)
+{
+    if (bb_vram_mapped != 1) { bb_v60_pin_release("left mode 13h"); return; }
+    for (unsigned i = 0; i < BB_PIN_N; ++i) {
+        uint32_t lin = (uint32_t)bb_pin_pages[i] << 12;
+        if ((bb_pin_mask & (1u << i)) && lin < ss_hi && lin + 4096u > ss_lo) { bb_v60_pin_release("stack moved onto a pinned page"); return; }
+    }
+    if (bb_pin_cooldown) { --bb_pin_cooldown; return; }
+    uint32_t added = 0;
+    for (unsigned i = 0; i < BB_PIN_N; ++i) {
+        if (bb_pin_mask & (1u << i)) continue;
+        uint32_t lin = (uint32_t)bb_pin_pages[i] << 12;
+        if (lin < 0x10000u || lin >= 0xA0000u || (lin < ss_hi && lin + 4096u > ss_lo)) continue;
+        int mr = b86_map_range(&C, lin, 4096u, bb_pin_frame(i));
+        if (mr == 0) { bb_pin_mask |= 1u << i; added |= 1u << i; ++bb_pin_maps; }
+        else {
+            static unsigned fails;
+            if (++fails <= 8u) { printf("[bb-v60-pin] page %05lX not pinned rc=%d (%s)\n", (unsigned long)lin, mr,
+                                        mr == -3 ? "translated code there" : mr == -2 ? "frame index collides" : "already mapped or bad"); fflush(stdout); }
+        }
+    }
+    if (added && bb_pin_maps <= 16u) {
+        printf("[bb-v60-pin] pinned to SRAM:");
+        for (unsigned i = 0; i < BB_PIN_N; ++i) if (added & (1u << i)) printf(" %05lX", (unsigned long)bb_pin_pages[i] << 12);
+        printf(" (%u of %u)\n", (unsigned)__builtin_popcount(bb_pin_mask), (unsigned)BB_PIN_N); fflush(stdout);
+    }
+}
+#else
+#define bb_pin_mask 0u
+static void bb_v60_pin_release(const char *why) { (void)why; }
+#endif
 /* before microDOS touches guest memory */
 static void bb_v40_release(const char *why)
 {
+    bb_v60_pin_release(why);
     if (!bb_bbuf_lin) return;
     b86_unmap_range(&C, bb_bbuf_lin, BB_WIN_BYTES);
     ++bb_v40_unmaps;
@@ -863,10 +957,30 @@ static void bb_v40_tick(void)
     if (now - bb_v40_last_us < 250000u) return;
     bb_v40_last_us = now; ++bb_v40_slices;
     uint32_t *cnt = C.rep_page_bytes;
+    /* v62: the end of the benchmark's rendering = the last REP copy into
+       A000 (one per frame) before 1.5 s of none; reported once per run */
+    {
+        uint64_t sum = 0, d;
+        for (unsigned p = 0xA0u; p < 0xB0u; ++p) sum += cnt[p];
+        d = sum >= bb_v61_a000_last ? sum - bb_v61_a000_last : sum;
+        bb_v61_a000_last = sum;
+        if (bb_v61_t0 && d) { bb_v61_last_frame_us = now; bb_v61_a000_bytes += d; }
+        if (bb_v61_t0 && bb_v61_last_frame_us && !bb_v61_render_reported && now - bb_v61_last_frame_us > 1500000u) {
+            uint64_t us = bb_v61_last_frame_us - bb_v61_t0;
+            bb_v61_render_reported = 1;
+            printf("[bb-v62-bench] rendering stopped %llu.%03llu s after the timer start (%llu frame copies to A000; +-0.25 s)\n",
+                   (unsigned long long)(us / 1000000u), (unsigned long long)((us / 1000u) % 1000u),
+                   (unsigned long long)(bb_v61_a000_bytes / 64000u));
+            fflush(stdout);
+        }
+    }
     /* blitz86 does not translate stack (SS) accesses: no mapped page may lie
        in the current SS window */
     uint32_t ss_lo = C.seg[B86_SS] << 4, ss_hi = ss_lo + 0x10000u;
     if (bb_bbuf_lin && bb_bbuf_lin < ss_hi && bb_bbuf_lin + BB_WIN_BYTES > ss_lo) bb_v40_release("stack moved into window");
+#if BB_PIN_N
+    bb_v60_pin_tick(ss_lo, ss_hi);
+#endif
     if (bb_bbuf_cooldown) { --bb_bbuf_cooldown; memset(cnt, 0, sizeof C.rep_page_bytes); return; }
     if (!bb_bbuf_lin) {
         /* best 16-page windows by REP store bytes; try them in order, since a
@@ -912,8 +1026,39 @@ static void bb_v40_release(const char *why) { (void)why; }
 static void bb_v40_tick(void) {}
 #endif
 
+static unsigned bb_v61_events;
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
+    /* v62: interrupt-vector traffic (INT 21h AH=25h set / AH=35h get), so a
+       bad vector restored at program exit can be traced to its source */
+    if (v == 0x21u) {
+        uint8_t ah = (uint8_t)(c->r[B86_AX] >> 8), al = (uint8_t)c->r[B86_AX];
+        static unsigned nvec;
+        if ((ah == 0x25u || ah == 0x35u) && nvec < 24u) {
+            ++nvec;
+            const uint8_t *ivt = c->mem + (uint32_t)al * 4u;     /* page 0 is never mapped */
+            if (ah == 0x25u)
+                printf("[bb-v62-vec] set INT %02X := %04X:%04X (was %04X:%04X) from %04X:%04X\n", (unsigned)al,
+                       (unsigned)c->seg[B86_DS], (unsigned)c->r[B86_DX], (unsigned)(ivt[2] | ivt[3] << 8), (unsigned)(ivt[0] | ivt[1] << 8),
+                       (unsigned)c->seg[B86_CS], (unsigned)c->ip);
+            else
+                printf("[bb-v62-vec] get INT %02X = %04X:%04X from %04X:%04X\n", (unsigned)al,
+                       (unsigned)(ivt[2] | ivt[3] << 8), (unsigned)(ivt[0] | ivt[1] << 8), (unsigned)c->seg[B86_CS], (unsigned)c->ip);
+            fflush(stdout);
+        }
+    }
+    /* v61: first DOS / video calls after the timed run starts (where the
+       program prints its result), as offsets from the start */
+    if (bb_v61_t0 && (v == 0x10u || v == 0x21u) && bb_v61_events < 4u) {
+        uint64_t us = bb_now_us() - bb_v61_t0;
+        if (us >= 500000u) {
+            ++bb_v61_events;
+            printf("[bb-v61-bench] +%llu.%03llu s: INT %02X AX=%04X at %04X:%04X\n",
+                   (unsigned long long)(us / 1000000u), (unsigned long long)((us / 1000u) % 1000u),
+                   (unsigned)v, (unsigned)c->r[B86_AX], (unsigned)c->seg[B86_CS], (unsigned)c->ip);
+            fflush(stdout);
+        }
+    }
     if (v == 0x16u) {
         uint16_t ax=(uint16_t)c->r[B86_AX], flags=b86_get_flags(c);
         uint16_t ip=(uint16_t)c->ip; uint8_t rewind=0;
@@ -975,7 +1120,7 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
     /* v46: only the DOS 2 device-driver vector (0xF1: request packets and
        transfer buffers) makes microDOS touch guest memory; others (e.g. INT 00
        raised by 3DBENCH, the 0xF0 strategy call) leave the window alone */
-    if (bb_bbuf_lin && v == 0xF1u) {
+    if ((bb_bbuf_lin || bb_pin_mask) && v == 0xF1u) {
         static char why[32];
         snprintf(why, sizeof why, "microDOS INT %02X AH=%02X", v, (unsigned)((c->r[B86_AX] >> 8) & 0xFFu));
         bb_v40_release(why);
@@ -988,6 +1133,31 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
     sync_pages();
     if (R->stop_reason != MD_STOP_NONE) c->irq |= 1u;
     return 1;
+}
+/* v61: 3DBENCH's score is 1000 / (whole tenths of a second), so only steps
+   of ~5% show. Time the run exactly: from the program reprogramming PIT
+   channel 0 (port 43h) to its next port-43h write or the next video-mode
+   change, whichever comes first. */
+static unsigned bb_v61_runs;
+static void bb_v61_end(const char *why)
+{
+    if (!bb_v61_t0) return;
+    uint64_t us = bb_now_us() - bb_v61_t0;
+    bb_v61_t0 = 0;
+    if (us < 500000u) return;                       /* not a benchmark run */
+    ++bb_v61_runs;
+    printf("[bb-v61-bench] timed run %u: %llu.%03llu s (start: PIT reprogram, end: %s)\n", bb_v61_runs,
+           (unsigned long long)(us / 1000000u), (unsigned long long)((us / 1000u) % 1000u), why);
+    fflush(stdout);
+}
+static void bb_v61_port(uint16_t port, uint8_t v)
+{
+    if (port != 0x43u) return;
+    if (bb_v61_t0) bb_v61_end("PIT reprogrammed again");
+    else if ((v & 0xC0u) == 0x00u) {                               /* channel 0 */
+        bb_v61_t0 = bb_now_us(); bb_v61_events = 0;
+        bb_v61_last_frame_us = 0; bb_v61_a000_bytes = 0; bb_v61_render_reported = 0;
+    }
 }
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
@@ -1009,6 +1179,7 @@ B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 {
     if(bb_irq36_out(port,v))return;
+    bb_v61_port(port,v);
     if(bb_pit_out(port,v,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     if (bb_vga_port_out(port,v,time_us_64())) return;
@@ -1034,6 +1205,7 @@ static uint8_t bb_v35_pit_in8(MdRuntime *rt,uint16_t port,void *user) {
 }
 static void bb_v35_pit_out8(MdRuntime *rt,uint16_t port,uint8_t v,void *user) {
     if(bb_irq36_out(port,v))return;
+    bb_v61_port(port,v);
     if(bb_pit_out(port,v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return;
     if(bb_v35_original_out8)bb_v35_original_out8(rt,port,v,user);
 }
