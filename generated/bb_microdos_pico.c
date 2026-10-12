@@ -1,3 +1,6 @@
+#include <stdbool.h>
+#include <stdint.h>
+extern bool bb_sd_boot_image(uint8_t *, unsigned);
 #include "bb_live.h"
 /* microDOS for Raspberry Pi Pico 2 / Pimoroni Pico Plus 2 (M20.2).
  *
@@ -1016,10 +1019,18 @@ int main(void)
            (unsigned long)MD_MSDOS2_DEFAULT_MEMORY_PARAGRAPHS / 64ul);
     if(disk_size!=MD_DISK_BYTES){md_say("microDOS: embedded disk is %lu bytes, expected %lu; halting.\n",(unsigned long)disk_size,(unsigned long)MD_DISK_BYTES);for(;;)sleep_ms(1000);}
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
+    memset(g_guest,0,MD_GUEST_BYTES);
+    memcpy(g_disk,md_blob_disk,MD_DISK_BYTES);
+    if (bb_sd_boot_image(g_disk, MD_DISK_BYTES)) {
+        md_say("  disk-source: SD BOOT.IMG (pre-LCD)\n");
+    } else {
+        memcpy(g_disk,md_blob_disk,MD_DISK_BYTES);
+        md_say("  disk-source: embedded fallback (pre-LCD)\n");
+    }
     bb_lcd_console_init();
 #endif
-    memset(g_guest,0,MD_GUEST_BYTES); memcpy(g_disk,md_blob_disk,MD_DISK_BYTES);
-    md_say("  disk:    360 KiB image copied from flash to PSRAM (writes are lost at reset)\n");
+    /* Disk and guest initialized before the LCD to isolate SD SPI timing. */
+    md_say("  disk:    360 KiB in PSRAM (writes are lost at reset)\n");
 
 #if MICRODOS_PICO_CACHE
     md_dos2_system_init(&g_sys, g_guest, &g_cache);

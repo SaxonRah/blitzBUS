@@ -251,6 +251,13 @@ pico_set_program_name(blitzbus_pico_b86_dos "blitzBUS DOS + blitz86 gated")
     else:
         cm+='\n'+block+'\n'
     cmake.write_text(cm,encoding='utf8')
+    import sys
+    sys.path.insert(0, str(root/'sd_boot'))
+    from bb_sd_overlay import apply as bb_sd_apply, disable as bb_sd_disable
+    if os.environ.get('BB_SD_BOOT', '0') == '1':
+        bb_sd_apply(md,root)
+    else:
+        bb_sd_disable(md)
     print('[blitzBUS] Installed opt-in live DOS/JIT target blitzbus_pico_b86_dos')
     print('[blitzBUS] Original DOS firmware source and target remain unchanged')
 if __name__=='__main__':main()
