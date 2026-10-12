@@ -68,3 +68,38 @@ def disable(md: Path):
     if begin in cm:
         if cm.count(begin)!=1 or cm.count(end)!=1: raise RuntimeError('Malformed SD markers')
         cmake.write_text(cm[:cm.index(begin)]+cm[cm.index(end)+len(end):],encoding='utf8')
+
+# BB_STAGE2B_READONLY: one safe CMake source replacement per build
+_stage2a_apply = apply
+
+def apply(md: Path, root: Path):
+    _stage2a_apply(md, root)
+    cmake = md / 'pico' / 'CMakeLists.txt'
+    path = (root / 'sd_boot' / 'bb_msdos2_boot.c').as_posix()
+    if not (root / 'sd_boot' / 'bb_msdos2_boot.c').is_file():
+        raise RuntimeError('Stage2B driver missing: ' + path)
+    # These helpers are bundled below so the installed overlay is standalone.
+    content = cmake.read_text(encoding='utf8')
+    content = _bb2_scrub(content)
+    content += (
+        '\n# BB_STAGE2B_V3_BEGIN\n'
+        'get_target_property(_bb_c_sources blitzbus_pico_b86_dos SOURCES)\n'
+        'list(REMOVE_ITEM _bb_c_sources "${MD_ROOT}/src/host/msdos2_boot.c")\n'
+        'list(REMOVE_ITEM _bb_c_sources "${CMAKE_CURRENT_LIST_DIR}/../src/host/msdos2_boot.c")\n'
+        'list(APPEND _bb_c_sources "' + path + '")\n'
+        'set_property(TARGET blitzbus_pico_b86_dos PROPERTY SOURCES "${_bb_c_sources}")\n'
+        '# BB_STAGE2B_V3_END\n'
+    )
+    if content.count('get_target_property(_bb_c_sources') != 1:
+        raise RuntimeError('Stage2B source not unique')
+    cmake.write_text(content,encoding='utf8')
+    print('[bb-sd-c] Stage2B CMake V3 one private driver:',path)
+
+def _bb2_scrub(s):
+    import re
+    s=re.sub(r'(?ms)^\s*# BB_STAGE2B_V3_BEGIN[^\n]*\n.*?^\s*# BB_STAGE2B_V3_END[^\n]*\n?', '\n', s)
+    s=re.sub(r'(?ms)^\s*get_target_property\(_bb_c_sources\s+blitzbus_pico_b86_dos\s+SOURCES\).*?^\s*set_property\(TARGET\s+blitzbus_pico_b86_dos\s+PROPERTY\s+SOURCES[^\n]*\n?', '\n', s)
+    s=re.sub(r'(?m)^\s*# BB_STAGE2B_READONLY[^\n]*\n?', '', s)
+    if '_bb_c_sources' in s or 'BB_STAGE2B_V3_' in s:
+        raise RuntimeError('Cannot remove stale Stage2B CMake fragment safely')
+    return s

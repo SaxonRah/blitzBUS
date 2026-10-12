@@ -15,6 +15,8 @@
 
 #define BB_SD_BYTES 368640u
 #define BB_SD_SECTOR 512u
+static FIL bb_c_img;
+static bool bb_c_open;
 static FIL bb_img;
 static bool bb_img_open;
 static unsigned long bb_write_count;
@@ -29,6 +31,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     UINT got;
     unsigned offset;
 
+    bb_c_open = false;
     bb_img_open = false;
     bb_write_count = bb_write_errors = 0;
     if (!dest || bytes != BB_SD_BYTES) return false;
@@ -64,6 +67,25 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
             return false;
         }
         offset += got;
+    }
+    /* Stage 2B C: opens only after known-good A:, before LCD clock change. */
+    {
+        char cpath[96];
+        if (snprintf(cpath, sizeof(cpath), "%s/BLITZBUS/DRIVE_C.IMG", drive) < (int)sizeof(cpath)) {
+            FRESULT cf = f_open(&bb_c_img, cpath, FA_READ);
+            if (cf == FR_OK) {
+                if (f_size(&bb_c_img) == (FSIZE_t)(16777216u)) {
+                    bb_c_open = true;
+                    printf("[bb-sd-c] DRIVE_C.IMG opened READ-ONLY 16 MiB\n");
+                } else {
+                    printf("[bb-sd-c] wrong image size=%lu expected=16777216\n",
+                           (unsigned long)f_size(&bb_c_img));
+                    (void)f_close(&bb_c_img);
+                }
+            } else {
+                printf("[bb-sd-c] C: unavailable open=%d (A: remains working)\n", (int)cf);
+            }
+        }
     }
     bb_img_open = true;
     printf("[bb-sd] A: BOOT.IMG %u bytes loaded; PERSISTENT WRITE-THROUGH ACTIVE\n", bytes);
@@ -130,5 +152,28 @@ bool bb_sd_persist_sector(uint32_t sector, const uint8_t *data, size_t size)
     if (bb_write_count <= 5u || bb_write_count % 64u == 0u)
         printf("[bb-sd] persisted LBA=%lu writes=%lu\n",
                (unsigned long)sector, bb_write_count);
+    return true;
+}
+
+/* BB_STAGE2B_C_READONLY
+ * 16 MiB FAT16 backing file. All read traffic uses FatFs, not guest PSRAM.
+ * The SPI1 baud rate must be reset after LCD changes clk_peri.
+ */
+bool bb_sd_c_available(void) { return bb_c_open; }
+bool bb_sd_c_read_sector(uint32_t sector, uint8_t *data, size_t size)
+{
+    FRESULT fr;
+    UINT got = 0u;
+    static unsigned count;
+    if (!bb_c_open || !data || size != 512u || sector >= 32768u) return false;
+    (void)spi_set_baudrate(spi1, 12500000u);
+    fr = f_lseek(&bb_c_img, (FSIZE_t)sector * 512u);
+    if (fr == FR_OK) fr = f_read(&bb_c_img, data, 512u, &got);
+    if (fr != FR_OK || got != 512u) {
+        printf("[bb-sd-c] read-failed lba=%lu fr=%d got=%u\n",
+               (unsigned long)sector, (int)fr, (unsigned)got);
+        return false;
+    }
+    if (++count <= 8u) printf("[bb-sd-c] read lba=%lu OK\n", (unsigned long)sector);
     return true;
 }
