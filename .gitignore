@@ -5,3 +5,4 @@ build/
 *.elf
 __pycache__/
 /build-host
+/tools/arj

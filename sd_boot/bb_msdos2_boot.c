@@ -4,6 +4,10 @@
 #include <assert.h>
 #include <string.h>
 
+extern bool bb_sd_b_select_path(const char *);
+extern bool bb_sd_b_select(unsigned);
+extern bool bb_sd_b_available(void);
+extern bool bb_sd_b_read_sector(uint32_t, uint8_t *, size_t);
 extern bool bb_sd_c_available(void);
 extern bool bb_sd_c_read_sector(uint32_t, uint8_t *, size_t);
 extern bool bb_sd_c_write_sector(uint32_t, const uint8_t *, size_t);
@@ -322,7 +326,7 @@ void md_msdos2_boot_install_devices(MdRuntime *runtime, MdMsdos2Boot *boot)
 
     /* Stage 2B: A/B floppy plus C FAT16; three physical units. */
     md_x86_write16(cpu, seg, MD_MSDOS2_BPB_TABLE_OFFSET, MD_MSDOS2_BPB_OFFSET);
-    md_x86_write16(cpu, seg, MD_MSDOS2_BPB_TABLE_OFFSET + 2u, MD_MSDOS2_BPB_OFFSET);
+    md_x86_write16(cpu, seg, MD_MSDOS2_BPB_TABLE_OFFSET + 2u, 0x0360u);
     md_x86_write16(cpu, seg, MD_MSDOS2_BPB_TABLE_OFFSET + 4u, 0x0340u);
     md_x86_write16(cpu, seg, MD_MSDOS2_BPB_OFFSET + 0u, 512u);
     md_x86_write8(cpu, seg, MD_MSDOS2_BPB_OFFSET + 2u, 2u);
@@ -332,15 +336,24 @@ void md_msdos2_boot_install_devices(MdRuntime *runtime, MdMsdos2Boot *boot)
     md_x86_write16(cpu, seg, MD_MSDOS2_BPB_OFFSET + 8u, 720u);
     md_x86_write8(cpu, seg, MD_MSDOS2_BPB_OFFSET + 10u, 0xFDu);
     md_x86_write16(cpu, seg, MD_MSDOS2_BPB_OFFSET + 11u, 2u);
+    /* B: standard 1.44 MiB 3.5-inch FAT12 BPB. */
+    md_x86_write16(cpu, seg, 0x0360u + 0u, 512u);
+    md_x86_write8(cpu, seg, 0x0360u + 2u, 1u);
+    md_x86_write16(cpu, seg, 0x0360u + 3u, 1u);
+    md_x86_write8(cpu, seg, 0x0360u + 5u, 2u);
+    md_x86_write16(cpu, seg, 0x0360u + 6u, 224u);
+    md_x86_write16(cpu, seg, 0x0360u + 8u, 2880u);
+    md_x86_write8(cpu, seg, 0x0360u + 10u, 0xF0u);
+    md_x86_write16(cpu, seg, 0x0360u + 11u, 9u);
     /* C: BPB values are read directly from the generated 16 MiB FAT16 image. */
     md_x86_write16(cpu, seg, 0x0340u + 0u, 512u);
     md_x86_write8(cpu, seg, 0x0340u + 2u, 4u);
     md_x86_write16(cpu, seg, 0x0340u + 3u, 1u);
     md_x86_write8(cpu, seg, 0x0340u + 5u, 2u);
     md_x86_write16(cpu, seg, 0x0340u + 6u, 512u);
-    md_x86_write16(cpu, seg, 0x0340u + 8u, 32768u);
+    md_x86_write16(cpu, seg, 0x0340u + 8u, 61440u);
     md_x86_write8(cpu, seg, 0x0340u + 10u, 0xF8u);
-    md_x86_write16(cpu, seg, 0x0340u + 11u, 32u);
+    md_x86_write16(cpu, seg, 0x0340u + 11u, 64u);
 
     md_install_postinit_program(runtime, boot);
 
@@ -569,7 +582,7 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
     uint16_t i;
     uint8_t sector[512];
 
-    if (unit > 2u || (unit == 2u && !bb_sd_c_available())) {
+    if (unit > 2u || (unit == 1u && !bb_sd_b_available()) || (unit == 2u && !bb_sd_c_available())) {
         md_device_error(runtime, boot, MD_DEV_ERR_UNKNOWN_UNIT);
         return true;
     }
@@ -586,7 +599,7 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
     start = md_x86_read16(cpu, boot->request_segment,
                           (uint16_t)(boot->request_offset + MD_REQ_START));
 
-    if ((uint32_t)start + count > (unit == 2u ? 32768u : boot->disk.sector_count)) {
+    if ((uint32_t)start + count > (unit == 2u ? 61440u : (unit == 1u ? 2880u : boot->disk.sector_count))) {
         md_device_error(runtime, boot, MD_DEV_ERR_SECTOR_NOT_FOUND);
         return true;
     }
@@ -600,6 +613,10 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
                                   (uint16_t)(sector_index * boot->disk.sector_size));
 
         if (write) {
+            if (unit == 1u) {
+                md_device_error(runtime, boot, MD_DEV_ERR_WRITE_FAULT);
+                return true;
+            }
             if (unit != 2u && (!boot->disk.writable || boot->disk.write == NULL)) {
                 md_device_error(runtime, boot, MD_DEV_ERR_WRITE_FAULT);
                 return true;
@@ -616,8 +633,9 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
             }
             ++boot->disk_sectors_written;
         } else {
-            if ((unit == 2u && !bb_sd_c_read_sector(lba, sector, sizeof(sector))) ||
-                (unit != 2u && (boot->disk.read == NULL ||
+            if ((unit == 1u && !bb_sd_b_read_sector(lba, sector, sizeof(sector))) ||
+                (unit == 2u && !bb_sd_c_read_sector(lba, sector, sizeof(sector))) ||
+                (unit == 0u && (boot->disk.read == NULL ||
                 !boot->disk.read(boot->disk.user, lba, sector, boot->disk.sector_size)))) {
                 md_device_error(runtime, boot, MD_DEV_ERR_READ_FAULT);
                 return true;
@@ -642,26 +660,26 @@ static bool MD_DOS_HOT_FUNC(md_disk_service)(MdRuntime *runtime, MdMsdos2Boot *b
     switch (boot->last_request_function) {
         case MD_DEV_MEDIA_CHECK:
             ++boot->disk_media_checks;
-            if (unit > 2u || (unit == 2u && !bb_sd_c_available())) {
+            if (unit > 2u || (unit == 1u && !bb_sd_b_available()) || (unit == 2u && !bb_sd_c_available())) {
                 md_device_error(runtime, boot, MD_DEV_ERR_UNKNOWN_UNIT);
             } else {
                 /* Fixed host image: media has not changed. */
                 md_x86_write8(cpu, boot->request_segment,
-                              (uint16_t)(boot->request_offset + MD_REQ_MEDIA_RESULT), 1u);
+                              (uint16_t)(boot->request_offset + MD_REQ_MEDIA_RESULT), unit == 1u ? 0xFFu : 1u);
                 md_device_status(runtime, boot, MD_DEV_STATUS_DONE);
             }
             return true;
 
         case MD_DEV_BUILD_BPB:
             ++boot->disk_bpb_calls;
-            if (unit > 2u || (unit == 2u && !bb_sd_c_available())) {
+            if (unit > 2u || (unit == 1u && !bb_sd_b_available()) || (unit == 2u && !bb_sd_c_available())) {
                 md_device_error(runtime, boot, MD_DEV_ERR_UNKNOWN_UNIT);
             } else {
                 md_x86_write8(cpu, boot->request_segment,
-                              (uint16_t)(boot->request_offset + MD_REQ_MEDIA), unit == 2u ? 0xF8u : 0xFDu);
+                              (uint16_t)(boot->request_offset + MD_REQ_MEDIA), unit == 2u ? 0xF8u : (unit == 1u ? 0xF0u : 0xFDu));
                 md_write_far(cpu, boot->request_segment,
                              (uint16_t)(boot->request_offset + MD_REQ_BPB),
-                             unit == 2u ? 0x0340u : MD_MSDOS2_BPB_OFFSET, boot->bios_segment);
+                             unit == 2u ? 0x0340u : (unit == 1u ? 0x0360u : MD_MSDOS2_BPB_OFFSET), boot->bios_segment);
                 md_device_status(runtime, boot, MD_DEV_STATUS_DONE);
             }
             return true;
@@ -703,6 +721,29 @@ bool MD_DOS_HOT_FUNC(md_msdos2_boot_interrupt)(MdRuntime *runtime, uint8_t vecto
 {
     MdMsdos2Boot *boot = (MdMsdos2Boot *)user;
     MdX86 *cpu = &runtime->cpu;
+
+    /* Emulator-defined INT F6: AH=B0, AL=1..5. Returns AH=0 success, AH=1 error.
+       A DOS COM program on A: drives the runtime B: floppy selection. */
+    if (vector == 0xF6u && ((cpu->r[MD_X86_AX] >> 8) & 0xFFu) == 0xB1u) {
+        char path[128]; unsigned i; bool ok=false;
+        uint16_t dx=cpu->r[MD_X86_DX];
+        for (i=0u;i<sizeof(path)-1u;i++) {
+            uint8_t c=md_x86_read8(cpu,cpu->ds,(uint16_t)(dx+i));
+            if (!c || c==13u)break;
+            if (c<32u || c>=127u)break;
+            path[i]=(char)c;
+        }
+        path[i]=0;
+        if (i>0u && i<sizeof(path)-1u)ok=bb_sd_b_select_path(path);
+        cpu->r[MD_X86_AX]=(uint16_t)((ok?0u:1u)<<8);
+        return true;
+    }
+    if (vector == 0xF6u && ((cpu->r[MD_X86_AX] >> 8) & 0xFFu) == 0xB0u) {
+        unsigned number=(unsigned)(cpu->r[MD_X86_AX] & 0xFFu);
+        bool ok=bb_sd_b_select(number);
+        cpu->r[MD_X86_AX]=(uint16_t)((ok ? 0u : 1u)<<8 | number);
+        return true;
+    }
 
     if (vector == MD_MSDOS2_NATIVE_STRATEGY_INT) {
         boot->request_segment = cpu->es;
