@@ -1,6 +1,8 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 extern bool bb_sd_boot_image(uint8_t *, unsigned);
+extern bool bb_sd_persist_sector(uint32_t, const uint8_t *, size_t);
 #include "bb_live.h"
 /* microDOS for Raspberry Pi Pico 2 / Pimoroni Pico Plus 2 (M20.2).
  *
@@ -315,6 +317,7 @@ static bool disk_write(void *user, uint32_t sector, const uint8_t *data, size_t 
     g_con.idle_polls = 0u;
     {
         const uint64_t t0 = time_us_64();
+        if (!bb_sd_persist_sector(sector, data, size)) return false;
         memcpy(g_disk + off, data, size);
         g_perf.disk_us += time_us_64() - t0;
     }
@@ -1022,15 +1025,15 @@ int main(void)
     memset(g_guest,0,MD_GUEST_BYTES);
     memcpy(g_disk,md_blob_disk,MD_DISK_BYTES);
     if (bb_sd_boot_image(g_disk, MD_DISK_BYTES)) {
-        md_say("  disk-source: SD BOOT.IMG (pre-LCD)\n");
+        md_say("  disk-source: SD BOOT.IMG (pre-LCD, persistent writes)\n");
     } else {
         memcpy(g_disk,md_blob_disk,MD_DISK_BYTES);
-        md_say("  disk-source: embedded fallback (pre-LCD)\n");
+        md_say("  disk-source: embedded fallback (volatile)\n");
     }
     bb_lcd_console_init();
 #endif
-    /* Disk and guest initialized before the LCD to isolate SD SPI timing. */
-    md_say("  disk:    360 KiB in PSRAM (writes are lost at reset)\n");
+    /* guest/disk initialized before LCD */
+    md_say("  disk:    360 KiB in PSRAM (SD writes persist, fallback volatile)\n");
 
 #if MICRODOS_PICO_CACHE
     md_dos2_system_init(&g_sys, g_guest, &g_cache);
