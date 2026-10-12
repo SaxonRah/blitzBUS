@@ -6,6 +6,7 @@
 
 extern bool bb_sd_c_available(void);
 extern bool bb_sd_c_read_sector(uint32_t, uint8_t *, size_t);
+extern bool bb_sd_c_write_sector(uint32_t, const uint8_t *, size_t);
 
 /* DOS 2.x device header layout from DEVSYM.ASM. */
 enum {
@@ -599,11 +600,7 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
                                   (uint16_t)(sector_index * boot->disk.sector_size));
 
         if (write) {
-            if (unit == 2u) {
-                md_device_error(runtime, boot, MD_DEV_ERR_WRITE_FAULT);
-                return true;
-            }
-            if (!boot->disk.writable || boot->disk.write == NULL) {
+            if (unit != 2u && (!boot->disk.writable || boot->disk.write == NULL)) {
                 md_device_error(runtime, boot, MD_DEV_ERR_WRITE_FAULT);
                 return true;
             }
@@ -611,7 +608,9 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
                 sector[i] = md_x86_read8(cpu, data_segment,
                                          (uint16_t)(guest_base + i));
             }
-            if (!boot->disk.write(boot->disk.user, lba, sector, boot->disk.sector_size)) {
+            if (!(unit == 2u ?
+                  bb_sd_c_write_sector(lba, sector, sizeof(sector)) :
+                  boot->disk.write(boot->disk.user, lba, sector, boot->disk.sector_size))) {
                 md_device_error(runtime, boot, MD_DEV_ERR_WRITE_FAULT);
                 return true;
             }
@@ -789,3 +788,5 @@ bool MD_DOS_HOT_FUNC(md_msdos2_boot_interrupt)(MdRuntime *runtime, uint8_t vecto
 
     return false;
 }
+
+/* BB_STAGE2C_C_WRITABLE */

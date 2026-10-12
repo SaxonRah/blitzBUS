@@ -17,6 +17,7 @@
 #define BB_SD_SECTOR 512u
 static FIL bb_c_img;
 static bool bb_c_open;
+static void bb_c_cache_reset(void);
 static FIL bb_img;
 static bool bb_img_open;
 static unsigned long bb_write_count;
@@ -32,6 +33,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     unsigned offset;
 
     bb_c_open = false;
+    bb_c_cache_reset();
     bb_img_open = false;
     bb_write_count = bb_write_errors = 0;
     if (!dest || bytes != BB_SD_BYTES) return false;
@@ -72,11 +74,11 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     {
         char cpath[96];
         if (snprintf(cpath, sizeof(cpath), "%s/BLITZBUS/DRIVE_C.IMG", drive) < (int)sizeof(cpath)) {
-            FRESULT cf = f_open(&bb_c_img, cpath, FA_READ);
+            FRESULT cf = f_open(&bb_c_img, cpath, FA_READ | FA_WRITE);
             if (cf == FR_OK) {
                 if (f_size(&bb_c_img) == (FSIZE_t)(16777216u)) {
                     bb_c_open = true;
-                    printf("[bb-sd-c] DRIVE_C.IMG opened READ-ONLY 16 MiB\n");
+                    printf("[bb-sd-c] DRIVE_C.IMG opened READ-WRITE 16 MiB\n");
                 } else {
                     printf("[bb-sd-c] wrong image size=%lu expected=16777216\n",
                            (unsigned long)f_size(&bb_c_img));
@@ -159,6 +161,66 @@ bool bb_sd_persist_sector(uint32_t sector, const uint8_t *data, size_t size)
  * 16 MiB FAT16 backing file. All read traffic uses FatFs, not guest PSRAM.
  * The SPI1 baud rate must be reset after LCD changes clk_peri.
  */
+
+/* BB_STAGE2D_C_READ_CACHE
+ * Four clean sectors (2 KiB). Never cache dirty data, never delay f_sync.
+ * No card/image sharing with another USB mass storage host while mounted.
+ */
+#define BB_C_CACHE_COUNT 4u
+typedef struct {
+    uint32_t sector;
+    uint32_t age;
+    bool valid;
+    uint8_t bytes[512];
+} bb_c_cache_entry;
+static bb_c_cache_entry bb_c_cache[BB_C_CACHE_COUNT];
+static uint32_t bb_c_cache_age;
+static unsigned long bb_c_cache_hit, bb_c_cache_miss, bb_c_cache_invalid;
+
+static void bb_c_cache_reset(void)
+{
+    unsigned i;
+    for (i = 0; i < BB_C_CACHE_COUNT; ++i) bb_c_cache[i].valid = false;
+    bb_c_cache_age = 0u;
+    bb_c_cache_hit = bb_c_cache_miss = bb_c_cache_invalid = 0u;
+}
+static void bb_c_cache_invalidate(uint32_t sector)
+{
+    unsigned i;
+    for (i = 0; i < BB_C_CACHE_COUNT; ++i) {
+        if (bb_c_cache[i].valid && bb_c_cache[i].sector == sector) {
+            bb_c_cache[i].valid = false;
+            ++bb_c_cache_invalid;
+        }
+    }
+}
+static bool bb_c_cache_lookup(uint32_t sector, uint8_t *out)
+{
+    unsigned i;
+    for (i = 0; i < BB_C_CACHE_COUNT; ++i) {
+        if (bb_c_cache[i].valid && bb_c_cache[i].sector == sector) {
+            memcpy(out, bb_c_cache[i].bytes, 512u);
+            bb_c_cache[i].age = ++bb_c_cache_age;
+            ++bb_c_cache_hit;
+            return true;
+        }
+    }
+    ++bb_c_cache_miss;
+    return false;
+}
+static void bb_c_cache_insert(uint32_t sector, const uint8_t *data)
+{
+    unsigned i, victim=0u;
+    for (i = 0u; i < BB_C_CACHE_COUNT; ++i) {
+        if (!bb_c_cache[i].valid) { victim=i; break; }
+        if (bb_c_cache[i].age < bb_c_cache[victim].age) victim=i;
+    }
+    bb_c_cache[victim].sector=sector;
+    bb_c_cache[victim].age=++bb_c_cache_age;
+    memcpy(bb_c_cache[victim].bytes, data, 512u);
+    bb_c_cache[victim].valid=true;
+}
+
 bool bb_sd_c_available(void) { return bb_c_open; }
 bool bb_sd_c_read_sector(uint32_t sector, uint8_t *data, size_t size)
 {
@@ -166,6 +228,7 @@ bool bb_sd_c_read_sector(uint32_t sector, uint8_t *data, size_t size)
     UINT got = 0u;
     static unsigned count;
     if (!bb_c_open || !data || size != 512u || sector >= 32768u) return false;
+    if (bb_c_cache_lookup(sector, data)) return true;
     (void)spi_set_baudrate(spi1, 12500000u);
     fr = f_lseek(&bb_c_img, (FSIZE_t)sector * 512u);
     if (fr == FR_OK) fr = f_read(&bb_c_img, data, 512u, &got);
@@ -174,6 +237,53 @@ bool bb_sd_c_read_sector(uint32_t sector, uint8_t *data, size_t size)
                (unsigned long)sector, (int)fr, (unsigned)got);
         return false;
     }
-    if (++count <= 8u) printf("[bb-sd-c] read lba=%lu OK\n", (unsigned long)sector);
+    bb_c_cache_insert(sector, data);
+    if (++count <= 8u) printf("[bb-sd-c] read lba=%lu OK (cache h=%lu m=%lu)\n",
+        (unsigned long)sector, bb_c_cache_hit, bb_c_cache_miss);
+    return true;
+}
+
+
+/* BB_STAGE2C_C_WRITABLE
+ * DOS unit 2 -> FAT16 image sector write-through. Conservative first release:
+ * 512 bytes per transaction; FatFs f_sync before acknowledging DOS success.
+ * Never writes the host FAT32 filesystem outside DRIVE_C.IMG.
+ * No PSRAM image copy and no cache needed for correctness.
+ */
+bool bb_sd_c_write_sector(uint32_t sector, const uint8_t *data, size_t size)
+{
+    static unsigned long writes, errors;
+    FRESULT fr;
+    UINT wrote = 0u;
+    if (!bb_c_open || !data || size != 512u || sector >= 32768u) return false;
+    /* LCD retunes clk_peri to 150 MHz after the card is initialized. */
+    (void)spi_set_baudrate(spi1, 12500000u);
+    fr = f_lseek(&bb_c_img, (FSIZE_t)sector * 512u);
+    if (fr != FR_OK) {
+        ++errors;
+        printf("[bb-sd-c] WRITE ERROR stage=seek lba=%lu fr=%d errors=%lu\n",
+               (unsigned long)sector, (int)fr, errors);
+        return false;
+    }
+    /* Invalidate before modifying backing storage, including on failure. */
+    bb_c_cache_invalidate(sector);
+    fr = f_write(&bb_c_img, data, 512u, &wrote);
+    if (fr != FR_OK || wrote != 512u) {
+        ++errors;
+        printf("[bb-sd-c] WRITE ERROR stage=write lba=%lu fr=%d wrote=%u errors=%lu\n",
+               (unsigned long)sector, (int)fr, (unsigned)wrote, errors);
+        return false;
+    }
+    fr = f_sync(&bb_c_img);
+    if (fr != FR_OK) {
+        ++errors;
+        printf("[bb-sd-c] WRITE ERROR stage=sync lba=%lu fr=%d wrote=%u errors=%lu\n",
+               (unsigned long)sector, (int)fr, (unsigned)wrote, errors);
+        return false;
+    }
+    ++writes;
+    if (writes <= 12u || writes % 64u == 0u)
+        printf("[bb-sd-c] persisted lba=%lu writes=%lu\n",
+               (unsigned long)sector, writes);
     return true;
 }

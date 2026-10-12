@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$MicroDOS='C:\microDOS',
     [string]$Blitz86='C:\blitz86_v2',
@@ -119,8 +119,16 @@ try {
                     $k=[Console]::ReadKey($true)
                     $ch=$k.KeyChar
                     if([int][char]$ch -eq 24){$quit=$true;break}
-                    if($k.Key -eq [ConsoleKey]::Enter){$serial.Write("`r");Write-Host ''}
-                    elseif([int][char]$ch -gt 0){$serial.Write([string]$ch);Write-Host -NoNewline $ch}
+                    if($k.Key -eq [ConsoleKey]::Enter){
+                        # DOS/COMMAND.COM provides its own CRLF echo.
+                        $serial.Write("`r")
+                    } elseif($k.Key -eq [ConsoleKey]::Backspace){
+                        # Forward ASCII BS once; guest handles erasure visually.
+                        $serial.Write([string][char]0x08)
+                    } elseif([int][char]$ch -gt 0){
+                        # Never echo locally: guest is the terminal's echo owner.
+                        $serial.Write([string]$ch)
+                    }
                 }
             } catch {
                 if(!$inputWarning){Write-Host '[blitzBUS] Keyboard not available in this host. Use a standard PowerShell console.';$inputWarning=$true}
