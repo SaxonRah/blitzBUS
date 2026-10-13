@@ -16,7 +16,18 @@ def main():
     if lcd_lace not in ("0","1"):
         raise SystemExit("BB_LCD_LACE must be 0 (full) or 1 (alternating rows)")
     lcd_peri=os.environ.get("BB_LCD_PERI_HZ","150000000")
-    hot=os.environ.get("BB_HOT_THRESHOLD","64")   # v58: 64 = 45.4 fps, no slowdowns
+    # BB_EVICTION_AB_V1: compiler parameters, no runtime overhead.
+    eviction_chunk=int(os.environ.get('BB_EVICT_CHUNK','4096'))
+    eviction_room=int(os.environ.get('BB_EVICT_ROOM','2048'))
+    if eviction_chunk not in (2048,4096,8192):
+        raise SystemExit('BB_EVICT_CHUNK must be 2048,4096,8192')
+    if eviction_room not in (2048,4096):
+        raise SystemExit('BB_EVICT_ROOM must be 2048,4096')
+    # BB_CHAIN_AUDIT_V1: test the existing chain mechanism, do not change its logic.
+    no_chain=os.environ.get("BB_NO_CHAIN","0")
+    if no_chain not in ("0","1"):
+        raise SystemExit("BB_NO_CHAIN must be 0 or 1")
+    hot=os.environ.get("BB_HOT_THRESHOLD","32")   # 32
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
     cpu=os.environ.get("BB_CPU","8086")       # v63: 8086 (exact), 186; v64: 286 (real mode)
@@ -120,6 +131,12 @@ def main():
 
 
     pico_text='#include "bb_live.h"\n'+pico_text
+    # BB_PSRAM_LAYOUT_DISK_AFTER_GUEST_V1: preserve all allocations; sort disk subsection after aligned guest.
+    # The normal loader still creates a 360 KiB g_disk and guest is unchanged.
+    _disk_decl = '__uninitialized_psram("md_disk")'
+    if pico_text.count(_disk_decl) != 1:
+        raise SystemExit("BB_PSRAM_LAYOUT_DISK_AFTER_GUEST_V1: expected one disk PSRAM declaration")
+    pico_text = pico_text.replace(_disk_decl, '__uninitialized_psram("zz_md_disk")', 1)
     pico_text=pico_text.replace(pico_anchor,'#define MD_GUEST_BYTES (MD_X86_ADDRESS_SPACE + 0x10020u)',1)
     # blitz86's SMC line map is indexed by host address >> 6: the guest buffer
     # must be 64-byte aligned (blitz86 refuses otherwise).
@@ -228,8 +245,8 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/src/system"
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
-    B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
-    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u
+    B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10 B86_EVICT_CHUNK={eviction_chunk}u B86_EVICT_ROOM={eviction_room}u
+    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u BB_NO_CHAIN={no_chain} BB_CHAIN_PROFILE=1
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
     B86_RAM_FUNCS=1 B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}

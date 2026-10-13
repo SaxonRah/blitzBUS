@@ -1,0 +1,8 @@
+{
+  "marker": "BB_RCX_MEM1_AB_V1",
+  "source": "C:\\blitz86_v2\\src\\jit.c",
+  "backup": "C:\\blitz86_v2\\src\\jit.c.bb-rcx-mem1-ab-original.bak",
+  "original_sha": "c3d60b6396385bf7068f4228f10b08ac665abf0de92a717775e492e2b496a07f",
+  "off_sha": "df8b4105ffaf4c3b25988edd4732fb1e329e6c4c010da9bc36794012935462d5",
+  "on_sha": "ea3e21dfa81601099facc3af0a6bbb517d9a37b8c61ef2fa2f2511b675d3bd03"
+}

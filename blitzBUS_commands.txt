@@ -1,12 +1,21 @@
-
+      ░                      ░                                                                          
+ ▄▄▄▄    ██▓     ██▓▄▄▄█████▓▒███████▒ ▄▄▄▄    █    ██   ██████                                         
+▓█████▄ ▓██▒    ▓██▒▓  ██▒ ▓▒▒ ▒ ▒ ▄▀░▓█████▄  ██  ▓██▒▒██    ▒                                         
+▒██▒ ▄██▒██░    ▒██▒▒ ▓██░ ▒░░ ▒ ▄▀▒░ ▒██▒ ▄██▓██  ▒██░░ ▓██▄                                           
+▒██░█▀  ▒██░    ░██░░ ▓██▓ ░   ▄▀▒   ░▒██░█▀  ▓▓█  ░██░  ▒   ██▒                                        
+░▓█  ▀█▓░██████▒░██░  ▒██▒ ░ ▒███████▒░▓█  ▀█▓▒▒█████▓ ▒██████▒▒                                        
+░▒▓███▀▒░ ▒░▓  ░░▓    ▒ ░░   ░▒▒ ▓░▒░▒░▒▓███▀▒░▒▓▒ ▒ ▒ ▒ ▒▓▒ ▒ ░                                        
+▒░▒   ░ ░ ░ ▒  ░ ▒ ░    ░    ░░▒ ▒ ░ ▒▒░▒   ░ ░░▒░ ░ ░ ░ ░▒  ░ ░                                        
+ ░    ░   ░ ░    ▒ ░  ░      ░ ░ ░ ░ ░ ░    ░  ░░░ ░ ░ ░  ░  ░                                          
+ ░          ░  ░ ░             ░ ░     ░         ░           ░                                          
+      ░                      ░              ░                    
+----------------------------------------------------------------
 
 cd C:\blitzBUS
 $env:BB_LCD_PERI_HZ = "150000000"; $env:BB_LCD_SPI_HZ = "75000000"; $env:BB_LCD_LACE = "1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\blitzBUS\scripts\bb_live_run.ps1 -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 -Port COM5 -Seconds 180
 
-
-
-
+----------------------------------------------------------------
 
 cd C:\blitzBUS
 $env:BB_SD_BOOT = "1"
@@ -20,11 +29,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
     -Port COM5 `
     -Seconds 180
 
-
-
-
+----------------------------------------------------------------
 
 cd C:\blitzBUS
 python -m serial.tools.miniterm COM5 115200
+
+----------------------------------------------------------------
+
+cd C:\blitzBUS
+
+$env:BB_HOT_THRESHOLD = "32"
+$env:BB_EVICT_CHUNK = "4096"
+$env:BB_EVICT_ROOM = "2048"
+$env:BB_BBUF = "1"
+$env:BB_CODE_KB = "232"
+$env:BB_CPU = "286"
+$env:BB_SD_BOOT = "1"
+
+$env:BB_LCD_PERI_HZ = "150000000"
+$env:BB_LCD_SPI_HZ = "75000000"
+$env:BB_LCD_LACE = "1"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+    .\scripts\bb_live_run.ps1 `
+    -MicroDOS C:\microDOS `
+    -Blitz86 C:\blitz86_v2 `
+    -Port COM5 `
+    -Seconds 180
 
 

@@ -23,6 +23,8 @@
 #include "bb_lcd_console.h"
 #endif
 #include "b86.h"
+/* BB_CHAIN_AUDIT_V1 */
+extern void b86_chain_audit_read(uint32_t out[10]);
 #if defined(BB_PC_PROFILE) && BB_PC_PROFILE
 #define BB_V49_PC_PROFILE 1 /* v58: installer env BB_PC_PROFILE=1 enables the PC sampler */
 #endif
@@ -115,14 +117,21 @@ static const char *fail_reason = "none";
    used by the dispatcher: keep it in PSRAM, SRAM goes to the code buffer.
    Build with -DB86_CALLOC=bb_meta_calloc -DB86_FREE=bb_meta_free. */
 #ifndef BB_META_BYTES
-#define BB_META_BYTES (1024u * 1024u)  /* + join bitmaps (2 x 136 KiB), heat table, r52 eviction patch log (64 KiB) */
+#define BB_META_BYTES (896u * 1024u)  /* + join bitmaps (2 x 136 KiB), heat table, r52 eviction patch log (64 KiB) */
 #endif
 static uint8_t __uninitialized_psram("bb_meta") bb_meta[BB_META_BYTES] __attribute__((aligned(16)));
 static size_t bb_meta_used;
+/* BB_META_TELEMETRY_V1 */
+static size_t bb_meta_max_failed_request;
+static unsigned bb_meta_failures;
 void *bb_meta_calloc(size_t n, size_t size)
 {
     size_t b = (n * size + 15u) & ~(size_t)15u;
-    if (bb_meta_used + b > BB_META_BYTES) return NULL;
+    if (b > BB_META_BYTES - bb_meta_used) {
+        ++bb_meta_failures;
+        if (b > bb_meta_max_failed_request) bb_meta_max_failed_request = b;
+        return NULL;
+    }
     void *p = bb_meta + bb_meta_used;
     bb_meta_used += b;
     memset(p, 0, b);
@@ -547,6 +556,52 @@ static void bb_v33_jit_line(void) {
     uint64_t xa=bb_xip_accesses(), xm=bb_xip_misses();
     if(!J)return;
     const B86JitStats *s=b86_jit_stats(J);
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    /* BB_META_PERIODIC_REPORT_V1 */
+    printf("[bb-meta-usage] used=%lu capacity=%lu free=%lu failures=%u max-failed-request=%lu\n",
+           (unsigned long)bb_meta_used,
+           (unsigned long)BB_META_BYTES,
+           (unsigned long)(BB_META_BYTES - bb_meta_used),
+           bb_meta_failures,
+           (unsigned long)bb_meta_max_failed_request);
+#endif
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    /* BB_REUSE_DIAG_V1: summary at existing periodic JIT report cadence. */
+    { uint32_t e=0,rt=0,col=0,br=0;
+      extern void b86_jit_reuse_diag(uint32_t *,uint32_t *,uint32_t *,uint32_t *);
+      b86_jit_reuse_diag(&e,&rt,&col,&br);
+      printf("[bb-reuse] evicted-keys=%lu retranslated=%lu slot-collisions=%lu broken-patches=%lu\n",
+        (unsigned long)e,(unsigned long)rt,(unsigned long)col,(unsigned long)br);
+    }
+#endif
+#if defined(BB_CHAIN_PROFILE) && BB_CHAIN_PROFILE
+    /* Cumulative counters: divide by an equal amount of benchmark work when comparing runs. */
+    {
+        uint32_t d[10] = {0};
+        b86_chain_audit_read(d);
+        printf("[bb-chain] no-chain=%u dispatches=%llu fast=%llu patched=%llu exit-chain=%lu exit-ret=%lu exit-lookup=%lu exit-irq=%lu exit-other=%lu stale=%lu disabled=%lu plog-full=%lu plog-peak=%lu ret-refused=%lu\n",
+               (unsigned)BB_NO_CHAIN,
+               (unsigned long long)s->dispatches, (unsigned long long)s->fast_dispatches,
+               (unsigned long long)s->chains,
+               (unsigned long)d[0], (unsigned long)d[1], (unsigned long)d[2],
+               (unsigned long)d[3], (unsigned long)d[4], (unsigned long)d[5],
+               (unsigned long)d[6], (unsigned long)d[7], (unsigned long)d[8],
+               (unsigned long)d[9]);
+    }
+#endif
+    /* BB_CHAIN_EXIT_SPLIT_V2: cumulative native exit reasons (not bb-jit deltas). */
+    printf("[bb-exit-split] dynamic=%llu native-fast-miss=%llu direct-lookup=%llu total-classified=%llu\n",
+           (unsigned long long)s->exit_dynamic,
+           (unsigned long long)s->exit_native_miss,
+           (unsigned long long)s->exit_direct_lookup,
+           (unsigned long long)(s->exit_dynamic + s->exit_native_miss + s->exit_direct_lookup + s->exit_step_return + s->exit_ds_guard + s->exit_dead_stub));
+    /* BB_EXIT_HOTSPOT_V1: cumulative counters, use per-report deltas. */
+    printf("[bb-exit-hotspot] step-return=%llu ds-guard=%llu dead-stub=%llu normal-dynamic=%llu native-fast-miss=%llu\n",
+           (unsigned long long)s->exit_step_return,
+           (unsigned long long)s->exit_ds_guard,
+           (unsigned long long)s->exit_dead_stub,
+           (unsigned long long)s->exit_dynamic,
+           (unsigned long long)s->exit_native_miss);
     printf("[bb-jit] native-ms=%llu translate-ms=%llu flushes=%llu blocks=%llu cold-insns=%llu "
            "rt-step=%llu rt-cond=%llu rt-flags=%llu rt-light=%llu rt-smc=%llu rt-rep=%llu "
            "joins=%llu inner=%llu splits=%llu xip-access=%llu xip-miss=%llu native-miss=%llu "
@@ -1307,6 +1362,9 @@ static int start(MdRuntime *rt)
 #define BB_HOT_THRESHOLD 64u   /* v58: 64 = 45.4 fps without slowdowns */
 #endif
     b86_jit_set_hot_threshold(J, BB_HOT_THRESHOLD);
+#if defined(BB_CHAIN_PROFILE) && BB_CHAIN_PROFILE
+    b86_jit_set_no_chain(J, BB_NO_CHAIN);
+#endif
 #if MICRODOS_TRANSLATION_SUPPORT
     memcpy(gen_seen, rt->code_page_generation, sizeof gen_seen);
 #endif
@@ -1618,6 +1676,12 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 void bb_live_get_stats(BbLiveStats *s)
 {
     *s = st;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    printf("[bb-meta-usage] used=%lu capacity=%lu free=%lu failures=%u max-failed-request=%lu\n",
+           (unsigned long)bb_meta_used, (unsigned long)BB_META_BYTES,
+           (unsigned long)(BB_META_BYTES - bb_meta_used),
+           bb_meta_failures, (unsigned long)bb_meta_max_failed_request);
+#endif
     if (J) {
         const B86JitStats *js = b86_jit_stats(J);
         s->translate_us = js->translate_us;

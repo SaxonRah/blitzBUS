@@ -94,7 +94,7 @@ static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(0x200000
 #define g_guest (g_guest_raw + 0xA0000u)
 #endif
 #endif
-static uint8_t __uninitialized_psram("md_disk") __attribute__((aligned(16)))
+static uint8_t __uninitialized_psram("zz_md_disk") __attribute__((aligned(16)))
     g_disk[MD_DISK_BYTES];
 
 static MdDos2System g_sys;
