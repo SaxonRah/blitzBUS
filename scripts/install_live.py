@@ -19,6 +19,10 @@ def main():
     hot=os.environ.get("BB_HOT_THRESHOLD","64")   # v58: 64 = 45.4 fps, no slowdowns
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
+    cpu=os.environ.get("BB_CPU","8086")       # v63: 8086 (exact), 186; v64: 286 (real mode)
+    if cpu not in ("8086","186","286"):
+        raise SystemExit("BB_CPU must be 8086, 186 or 286")
+    cpu_model={"8086":0,"186":1,"286":2}[cpu]
     paged=os.environ.get("BB_PAGED","1")
     if paged not in ("0","1"):
         raise SystemExit("BB_PAGED must be 0 or 1 (v40 SRAM-backed guest pages)")
@@ -225,7 +229,7 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10
-    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u
+    BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
     B86_RAM_FUNCS=1 B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}

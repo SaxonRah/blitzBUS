@@ -6,6 +6,8 @@
 
 extern bool bb_sd_b_select_path(const char *);
 extern bool bb_sd_b_select(unsigned);
+extern bool bb_sd_c_bpb(uint8_t out[13]);
+extern uint32_t bb_sd_c_sectors(void);
 extern bool bb_sd_b_available(void);
 extern bool bb_sd_b_read_sector(uint32_t, uint8_t *, size_t);
 extern bool bb_sd_c_available(void);
@@ -354,6 +356,11 @@ void md_msdos2_boot_install_devices(MdRuntime *runtime, MdMsdos2Boot *boot)
     md_x86_write16(cpu, seg, 0x0340u + 8u, 61440u);
     md_x86_write8(cpu, seg, 0x0340u + 10u, 0xF8u);
     md_x86_write16(cpu, seg, 0x0340u + 11u, 64u);
+    {   /* sd_boot r2: the opened image's own BPB (any size up to 65535 sectors) */
+        uint8_t cbpb[13];
+        if (bb_sd_c_bpb(cbpb))
+            for (unsigned k = 0u; k < sizeof cbpb; ++k) md_x86_write8(cpu, seg, (uint16_t)(0x0340u + k), cbpb[k]);
+    }
 
     md_install_postinit_program(runtime, boot);
 
@@ -599,7 +606,7 @@ static bool MD_DOS_HOT_FUNC(md_disk_transfer)(MdRuntime *runtime, MdMsdos2Boot *
     start = md_x86_read16(cpu, boot->request_segment,
                           (uint16_t)(boot->request_offset + MD_REQ_START));
 
-    if ((uint32_t)start + count > (unit == 2u ? 61440u : (unit == 1u ? 2880u : boot->disk.sector_count))) {
+    if ((uint32_t)start + count > (unit == 2u ? bb_sd_c_sectors() : (unit == 1u ? 2880u : boot->disk.sector_count))) {
         md_device_error(runtime, boot, MD_DEV_ERR_SECTOR_NOT_FOUND);
         return true;
     }

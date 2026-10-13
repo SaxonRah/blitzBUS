@@ -1257,6 +1257,11 @@ static int start(MdRuntime *rt)
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
     b86_init(&C, rt->cpu.memory);      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
+#ifndef BB_CPU_MODEL
+#define BB_CPU_MODEL 0u
+#endif
+    C.model = BB_CPU_MODEL;            /* v63: 0 = 8086 (exact), 1 = 80186 instruction set */
+    printf("[bb-v63-cpu] blitz86 CPU model %s\n", C.model >= 2 ? "80286 (real mode)" : C.model ? "80186" : "8086");
     C.int_hook = hook_int;
     C.code_hook = code_hook;
     C.in8 = hook_in;

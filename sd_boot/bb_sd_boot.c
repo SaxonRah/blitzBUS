@@ -20,6 +20,11 @@ static bool bb_b_open;
 static unsigned bb_b_number;
 static FIL bb_c_img;
 static bool bb_c_open;
+/* sd_boot r2: C: geometry comes from the image's own boot sector, so any
+ * FAT16 superfloppy up to 65535 sectors works (DOS 2.x addresses sectors
+ * with 16-bit numbers: 32 MiB per drive is the ceiling). */
+static uint32_t bb_c_sectors;
+static uint8_t bb_c_bpb[13];            /* boot sector bytes 11..23 = DOS 2 BPB */
 static void bb_c_cache_reset(void);
 static FIL bb_img;
 static bool bb_img_open;
@@ -81,11 +86,24 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
         if (snprintf(cpath, sizeof(cpath), "%s/BLITZBUS/DRIVE_C.IMG", drive) < (int)sizeof(cpath)) {
             FRESULT cf = f_open(&bb_c_img, cpath, FA_READ | FA_WRITE);
             if (cf == FR_OK) {
-                if (f_size(&bb_c_img) == (FSIZE_t)(31457280u)) {
+                uint8_t bs[512];
+                UINT bgot = 0u;
+                FRESULT rf = f_read(&bb_c_img, bs, 512u, &bgot);
+                const uint32_t bps = (uint32_t)bs[11] | (uint32_t)bs[12] << 8;
+                const uint32_t tot = (uint32_t)bs[19] | (uint32_t)bs[20] << 8;
+                const uint32_t spf = (uint32_t)bs[22] | (uint32_t)bs[23] << 8;
+                if (rf == FR_OK && bgot == 512u && bs[510] == 0x55u && bs[511] == 0xAAu &&
+                    bps == 512u && bs[13] != 0u && tot != 0u && spf != 0u &&
+                    f_size(&bb_c_img) == (FSIZE_t)tot * 512u) {
+                    memcpy(bb_c_bpb, bs + 11, sizeof bb_c_bpb);
+                    bb_c_sectors = tot;
                     bb_c_open = true;
-                    printf("[bb-sd-c] DRIVE_C.IMG opened READ-WRITE 30 MiB\n");
+                    printf("[bb-sd-c] DRIVE_C.IMG opened READ-WRITE %lu sectors (%lu KiB, %u-sector clusters)\n",
+                           (unsigned long)tot, (unsigned long)(tot / 2u), (unsigned)bs[13]);
                 } else {
-                    printf("[bb-sd-c] wrong image size=%lu expected=31457280\n",
+                    printf("[bb-sd-c] DRIVE_C.IMG rejected: read=%d sig=%02X%02X bps=%lu tot16=%lu size=%lu "
+                           "(need a 512-byte-sector FAT image with tot16 * 512 == file size)\n",
+                           (int)rf, bs[510], bs[511], (unsigned long)bps, (unsigned long)tot,
                            (unsigned long)f_size(&bb_c_img));
                     (void)f_close(&bb_c_img);
                 }
@@ -261,12 +279,20 @@ static void bb_c_cache_insert(uint32_t sector, const uint8_t *data)
 }
 
 bool bb_sd_c_available(void) { return bb_c_open; }
+uint32_t bb_sd_c_sectors(void) { return bb_c_open ? bb_c_sectors : 0u; }
+/* 13-byte DOS 2 BPB of C: (bytes 11..23 of its boot sector); false if no C:. */
+bool bb_sd_c_bpb(uint8_t out[13])
+{
+    if (!bb_c_open) return false;
+    memcpy(out, bb_c_bpb, sizeof bb_c_bpb);
+    return true;
+}
 bool bb_sd_c_read_sector(uint32_t sector, uint8_t *data, size_t size)
 {
     FRESULT fr;
     UINT got = 0u;
     static unsigned count;
-    if (!bb_c_open || !data || size != 512u || sector >= 61440u) return false;
+    if (!bb_c_open || !data || size != 512u || sector >= bb_c_sectors) return false;
     if (bb_c_cache_lookup(sector, data)) return true;
     (void)spi_set_baudrate(spi1, 12500000u);
     fr = f_lseek(&bb_c_img, (FSIZE_t)sector * 512u);
@@ -294,7 +320,7 @@ bool bb_sd_c_write_sector(uint32_t sector, const uint8_t *data, size_t size)
     static unsigned long writes, errors;
     FRESULT fr;
     UINT wrote = 0u;
-    if (!bb_c_open || !data || size != 512u || sector >= 61440u) return false;
+    if (!bb_c_open || !data || size != 512u || sector >= bb_c_sectors) return false;
     /* LCD retunes clk_peri to 150 MHz after the card is initialized. */
     (void)spi_set_baudrate(spi1, 12500000u);
     fr = f_lseek(&bb_c_img, (FSIZE_t)sector * 512u);

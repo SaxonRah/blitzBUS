@@ -105,7 +105,11 @@ static int bb_irq36_dispatch(MdRuntime *rt,uint64_t now){
  if(!(ip|cs)){bb_v37_poll_end();return 0;}
  bb_irq36.irr&=(uint8_t)~1u;
  if(!bb_irq36.auto_eoi)bb_irq36.isr|=1u;
+#if defined(BB_CPU_MODEL) && BB_CPU_MODEL >= 2
+ md_x86_push(c,(uint16_t)(flags&0x0FFFu));   /* v64: 286 real mode, FLAGS bits 12-15 read 0 */
+#else
  md_x86_push(c,flags);
+#endif
  md_x86_push(c,c->cs);
  md_x86_push(c,c->ip);
  md_x86_set_flags(c,(uint16_t)(flags&~0x0300u));
