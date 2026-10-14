@@ -949,6 +949,44 @@ static void bb622_vt_feed(uint8_t *m,unsigned c,uint64_t now) {
     bb622_vt_number=0u;
     bb622_vt_scancode(m,key);
 }
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+extern bool bb_sd_dos622_select_a(unsigned n);
+extern bool bb_sd_b_select(unsigned n);
+/* BB_DOS622_SWAP_LCD_V2: private CDC command prefix FS(1Ch), drive, digit.
+ * Normal BIOS keyboard bytes remain unchanged; no UART/SD concurrency.
+ * Host sends the whole command while DOS is paused at the floppy prompt.
+ */
+static uint8_t bb622_swap_step;
+static uint8_t bb622_swap_drive;
+static uint64_t bb622_swap_started_us;
+static void bb622_swap_receive(unsigned ch)
+{
+    const uint64_t now=bb_now_us();
+    if(bb622_swap_step && now-bb622_swap_started_us>2000000ull)bb622_swap_step=0u;
+    if(bb622_swap_step==0u) {
+        if(ch==0x1Cu){bb622_swap_step=1u;bb622_swap_started_us=now;}
+        return;
+    }
+    bb622_swap_started_us=now;
+    if(bb622_swap_step==1u) {
+        if(ch=='A'||ch=='B') {bb622_swap_drive=(uint8_t)ch;bb622_swap_step=2u;}
+        else bb622_swap_step=0u;
+        return;
+    }
+    bb622_swap_step=0u;
+    if(ch<'1'||ch>'9')return;
+    {
+        unsigned number=ch-'0';
+        bool success=(bb622_swap_drive=='A') ? bb_sd_dos622_select_a(number) :
+                                              bb_sd_b_select(number);
+        if(bb622_swap_drive=='B') {
+            printf("[bb622-swap] B:%u %s; BIOS media %s\n",number,
+                   success?"OK":"FAIL (previous disk retained)",success?"changed":"unchanged");
+            fflush(stdout);
+        }
+    }
+}
+#endif
 static void bb_v23_poll_input(void) {
     if (!R) return;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -960,6 +998,15 @@ static void bb_v23_poll_input(void) {
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     /* Avoid draining multiple characters during a single guest slice. */
     int c=getchar_timeout_us(0);
+    /* BB_DOS622_SWAP_LCD_V2: protected out-of-band 3-byte disk command.
+       1Ch A/B n; never forwards control bytes into DOS keyboard. */
+    if(bb_sd_dos622_active()) {
+        if(bb622_swap_step || c==0x1C) {
+            if(c>=0)bb622_swap_receive((unsigned)c);
+            else if(bb_now_us()-bb622_swap_started_us>2000000ull)bb622_swap_step=0u;
+            return;
+        }
+    }
     /* v33: once video owns the console, this poll is the only reader of the
        serial port, so Ctrl+] (0x1D) is handled here instead of reaching the
        guest keyboard queue. */

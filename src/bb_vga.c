@@ -191,6 +191,33 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
     case 0x0E:put_char(al,(uint8_t)*bx,*bx>>8,1);return true;
     case 0x0F:*ax=(uint16_t)((cols<<8)|mode);*bx=(uint16_t)((page<<8)|(*bx&255u));return true;
     case 0x10:return bios_palette(al,bx,cx,dx,*es);
+    /* BB_DOS622_EGA_INFO_V1: VGA-compatible EGA information query.
+     * INT 10h AH=12h BL=10h: BH=00 color, BL=03 256 KiB VGA-class
+     * adapter, CH=00 feature bits, CL=09 VGA-compatible switch setting.
+     * Unlike BL=30h/34h, BL=10h does NOT return AL=12h.
+     * Preserve AX/DX, flags, and current display state.
+     * Other AH=12h selectors remain separately implemented/unhandled.
+     */
+    case 0x12: {
+        if ((uint8_t)(*bx) != 0x10u) return false;
+        if (mode != 3u && mode != 0x13u) return false;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+        extern bool bb_sd_dos622_active(void);
+        if (!bb_sd_dos622_active()) return false;
+        *bx = 0x0003u;
+        *cx = 0x0009u;
+        { static unsigned bb622_ega_info_calls;
+          if (bb622_ega_info_calls++ < 2u) {
+              printf("[bb622-ega] INT10 AH=12 BL=10 AX=%04X BX=%04X CX=%04X (color VGA)\n",
+                  (unsigned)*ax,(unsigned)*bx,(unsigned)*cx);
+              fflush(stdout);
+          }
+        }
+        return true;
+#else
+        return false;
+#endif
+    }
     case 0x1A:if(al==0){*ax=0x001A;*bx=0x0008;return true;}return false;
     default:return false;
     }

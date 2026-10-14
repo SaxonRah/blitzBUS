@@ -1,27 +1,26 @@
-src/bb_vga.c: 253->1215 SHA 72ba7abecace->a98574aff4b8
-src/bb_live.c: 225->4690 SHA 0ae850a4979d->b25c65b284ac
-Parent metadata updates: 2; PROBE PASS; files untouched
-VERIFY PASS: 4 source/metadata files, original backups intact
-APPLIED: VGA INT10/AH=0B and DOS6 CDC VT key decoder; DOS2 unchanged
-VERIFY PASS: 4 source/metadata files, original backups intact
-VERIFY PASS: 4 source/metadata files, original backups intact
-RESTORE PASS: exact original source/manifest bytes
-SELFTEST LF: byte-exact source/metadata rollback PASS
-src/bb_vga.c: 261->1243 SHA e39d8e04e294->2e97a2d882f4
-src/bb_live.c: 231->4815 SHA 1feb6ac6df84->1531b0f6ed75
-Parent metadata updates: 2; PROBE PASS; files untouched
-VERIFY PASS: 4 source/metadata files, original backups intact
-APPLIED: VGA INT10/AH=0B and DOS6 CDC VT key decoder; DOS2 unchanged
-VERIFY PASS: 4 source/metadata files, original backups intact
-VERIFY PASS: 4 source/metadata files, original backups intact
-RESTORE PASS: exact original source/manifest bytes
-SELFTEST CRLF: byte-exact source/metadata rollback PASS
-[bb622-vtkey] scan=3B AX=3B00 queued=1
-[bb622-vtkey] scan=3D AX=3D00 queued=2
-[bb622-vtkey] scan=48 AX=4800 queued=3
-[bb622-vtkey] scan=86 AX=8600 queued=4
-[bb622-vtkey] scan=53 AX=5300 queued=5
-C11 keyboard sequences PASS
-C11 VGA 0Bh contract PASS
-SELFTEST PASS (Pico firmware and user hardware not tested)
-SELFTEST PASS: six-stage audit, latest corruption, historical backup corruption
+TRANSFORM LF PASS
+TRANSFORM CRLF PASS
+C11 PASS: full 25 rows, 80 char+attr cells, CP437 0xC4, color-only update retransmitted
+RUNNER PASS: raw transcript maintained, independent color helper
+src/bb_dos622_textio.inc: 2522->3612 bytes, SHA d3ae323b17f4->09e73220f742
+Host runner: 1536 bytes; CP437 + VGA color renderer: 8604 bytes
+Active metadata updates: 2 files
+PROBE PASS: all source and old runners unchanged
+VERIFY PASS: 5 source/host/metadata entries and backups
+APPLIED: CP437+VGA color cell mirror and independent host color runner; old DOS2 runner and SD images untouched
+VERIFY PASS: 5 source/host/metadata entries and backups
+VERIFY PASS: 5 source/host/metadata entries and backups
+RESTORED: exact previous sources/metadata; generated color runner and helper removed
+INSTALL LF PASS: SHA cascade, original runner untouched, rollback
+src/bb_dos622_textio.inc: 2590->3705 bytes, SHA 95d905aebca7->ad254a942399
+Host runner: 1536 bytes; CP437 + VGA color renderer: 8604 bytes
+Active metadata updates: 2 files
+PROBE PASS: all source and old runners unchanged
+VERIFY PASS: 5 source/host/metadata entries and backups
+APPLIED: CP437+VGA color cell mirror and independent host color runner; old DOS2 runner and SD images untouched
+VERIFY PASS: 5 source/host/metadata entries and backups
+VERIFY PASS: 5 source/host/metadata entries and backups
+RESTORED: exact previous sources/metadata; generated color runner and helper removed
+INSTALL CRLF PASS: SHA cascade, original runner untouched, rollback
+SELFTEST PASS: no repository files altered; Pico hardware not tested
+SELFTEST PASS: ten-stage audit, latest corruption, historical backup corruption

@@ -35,13 +35,92 @@ static uint32_t next_status_ms;
 static int active;
 /* BB_DOS622_SCREEN_CLEAR_V1: DOS6 has a clean dedicated 80x25 LCD surface. */
 static uint8_t bb622_text_owns_lcd;
+/* BB_DOS622_SWAP_LCD_V2: VGA text attributes in PSRAM, not RP2350 SRAM.
+ * Preserve DOS2 monochrome diagnostic HUD and video mode-13h DMA path.
+ */
+static uint8_t __uninitialized_psram("bb622_lcd_attr") bb622_lcd_attr[ROWS][COLS];
+static const uint16_t bb622_vga16[16]={
+    0x0000u,0x0015u,0x0540u,0x0555u,
+    0xA800u,0xA815u,0xAAA0u,0xAD55u,
+    0x52AAu,0x52BFu,0x57EAu,0x57FFu,
+    0xFAAAu,0xFABFu,0xFFE0u,0xFFFFu
+};
+/* Common IBM CP437 single/double box drawing, shaded and block cells.
+ * Coordinates are inside the preexisting 6x8 monochrome font cell. */
+static bool bb622_cp437_dot(unsigned c,unsigned x,unsigned y)
+{
+    const bool h=(y==3u),v=(x==2u),dh=(y==2u||y==5u),dv=(x==1u||x==4u);
+    switch(c) {
+    case 0xB0u:return ((x+y*3u)&3u)==0u;
+    case 0xB1u:return ((x+y)&1u)==0u;
+    case 0xB2u:return ((x+y*3u)&3u)!=0u;
+    case 0xDBu:return true;
+    case 0xDCu:return y>=4u;
+    case 0xDFu:return y<4u;
+    case 0xDDu:return x<3u;
+    case 0xDEu:return x>=3u;
+    case 0xB3u:return v;
+    case 0xC4u:return h;
+    case 0xDAu:return (h&&x>=2u)||(v&&y>=3u);
+    case 0xBFu:return (h&&x<=2u)||(v&&y>=3u);
+    case 0xC0u:return (h&&x>=2u)||(v&&y<=3u);
+    case 0xD9u:return (h&&x<=2u)||(v&&y<=3u);
+    case 0xC3u:return v||(h&&x>=2u);
+    case 0xB4u:return v||(h&&x<=2u);
+    case 0xC2u:return h||(v&&y>=3u);
+    case 0xC1u:return h||(v&&y<=3u);
+    case 0xC5u:return h||v;
+    case 0xBAu:return dv;
+    case 0xCDu:return dh;
+    case 0xC9u:return (dh&&x>=1u)||(dv&&y>=2u);
+    case 0xBBu:return (dh&&x<=4u)||(dv&&y>=2u);
+    case 0xC8u:return (dh&&x>=1u)||(dv&&y<=5u);
+    case 0xBCu:return (dh&&x<=4u)||(dv&&y<=5u);
+    case 0xCCu:return dv||(dh&&x>=1u);
+    case 0xB9u:return dv||(dh&&x<=4u);
+    case 0xCBu:return dh||(dv&&y>=2u);
+    case 0xCAu:return dh||(dv&&y<=5u);
+    case 0xCEu:return dh||dv;
+    default:return false;
+    }
+}
+static bool bb622_cp437_shape(unsigned c)
+{
+    switch(c) {
+    case 0xB0u:case 0xB1u:case 0xB2u:case 0xDBu:case 0xDCu:
+    case 0xDFu:case 0xDDu:case 0xDEu:case 0xB3u:case 0xC4u:
+    case 0xDAu:case 0xBFu:case 0xC0u:case 0xD9u:case 0xC3u:
+    case 0xB4u:case 0xC2u:case 0xC1u:case 0xC5u:case 0xBAu:
+    case 0xCDu:case 0xC9u:case 0xBBu:case 0xC8u:case 0xBCu:
+    case 0xCCu:case 0xB9u:case 0xCBu:case 0xCAu:case 0xCEu:return true;
+    default:return false;
+    }
+}
+static void bb622_lcd_draw_cell(uint16_t *dst,unsigned pitch,unsigned xx,
+                                 unsigned c,uint8_t attr)
+{
+    const uint16_t fg=bb622_vga16[attr&15u];
+    const uint16_t bg=bb622_vga16[(attr>>4u)&7u];
+    const bool special=bb622_cp437_shape(c);
+    const uint8_t *g=gfx_font5x7[(c>=32u&&c<=127u?c:(unsigned)'?')-32u];
+    for(unsigned y=0;y<8u;y++)for(unsigned x=0;x<6u;x++) {
+        bool on=special?bb622_cp437_dot(c,x,y):
+                     (y<7u&&x<5u&&(g[x]&(1u<<y))!=0u);
+        dst[y*pitch+xx+x]=on?fg:bg;
+    }
+}
+
 static void draw_glyph(uint16_t *dst,unsigned pitch,unsigned xx,unsigned yy,unsigned char c,uint16_t fg,uint16_t bg){
     const uint8_t *g=gfx_font5x7[(c>=32 && c<=127 ? c: '?')-32];
     for(unsigned gy=0;gy<8;gy++) for(unsigned gx=0;gx<6;gx++)
         dst[(yy+gy)*pitch+xx+gx]=(gy<7 && gx<5 && (g[gx]&(1u<<gy)))?fg:bg;
 }
 static void draw_row(unsigned r){
-    for(unsigned x=0;x<COLS;x++) draw_glyph(pixels,COLS*CW,x*CW,0,cells[r][x],0xFFFFu,0x0000u);
+    for(unsigned x=0;x<COLS;x++) {
+        if(bb622_text_owns_lcd)bb622_lcd_draw_cell(pixels,COLS*CW,x*CW,
+            cells[r][x],bb622_lcd_attr[r][x]);
+        else draw_glyph(pixels,COLS*CW,x*CW,0,cells[r][x],0xFFFFu,0x0000u);
+    }
     mr_pico_ili9341_flush(NULL,0,(int)(r*CH),480,CH,pixels,&lcd);
     paint_rows++;
 }
@@ -176,6 +255,7 @@ void bb622_lcd_text_mirror(const uint8_t *guest)
         bb622_text_owns_lcd=1u;
         mr_pico_ili9341_fill_screen(&lcd,0x0000u,480,320);
         memset(cells,0,sizeof cells);
+        memset(bb622_lcd_attr,0x07,sizeof bb622_lcd_attr);
         memset(dirty,1,sizeof dirty);
         puts("[bb622-lcdclear] DOS6 text LCD takeover, full 480x320 clear; DOS2 HUD disabled");
         fflush(stdout);
@@ -190,8 +270,11 @@ void bb622_lcd_text_mirror(const uint8_t *guest)
         unsigned dirty_row=0;
         for (unsigned x=0; x<COLS; ++x) {
             const uint8_t raw=text[(y*COLS+x)*2u];
-            const uint8_t ch=(raw>=32u && raw<=126u) ? raw : (uint8_t)' ';
-            if (cells[y][x] != ch) { cells[y][x]=ch; dirty_row=1u; }
+            const uint8_t ch=(raw>=32u) ? raw : (uint8_t)' ';
+            const uint8_t attr=text[(y*COLS+x)*2u+1u];
+            if (cells[y][x]!=ch || bb622_lcd_attr[y][x]!=attr) {
+                cells[y][x]=ch;bb622_lcd_attr[y][x]=attr;dirty_row=1u;
+            }
         }
         if (dirty_row) { dirty[y]=1u; ++changed_rows; }
     }
@@ -199,7 +282,7 @@ void bb622_lcd_text_mirror(const uint8_t *guest)
         bb_lcd_console_flush();
         if (!first_change_logged) {
             first_change_logged=1u;
-            printf("[bb622-lcdtext] B800 text shown on LCD; updated-rows=%u\n",changed_rows);
+            printf("[bb622-lcdcolor] 16-color VGA B800 text on LCD; updated-rows=%u\n",changed_rows);
             fflush(stdout);
         }
     }

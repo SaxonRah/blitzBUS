@@ -1,0 +1,29 @@
+sd_boot/bb_dos622_sd.inc: 296->2566 SHA 4dc209e9ecbb
+sd_boot/bb_sd_boot.c: 264->636 SHA f085ad84ffcb
+src/bb_dos622_bios.inc: 240->472 SHA 1bc6f4d86ba2
+src/bb_live.c: 254->2081 SHA e389affd9ed7
+src/bb_lcd_console.c: 474->3676 SHA 7c04db157d96
+scripts/bb_live_run_dos622_swap.ps1: NEW->2342 SHA bbbc41f5b72b
+scripts/bb_dos622_swap_color_host.ps1: NEW->953 SHA 945a392dd1b7
+Metadata cascade: 0 files; PROBE PASS; no edits
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+APPLIED: A/B hot-swaps, 16-color ST7796 text, unlimited F9 host console; images untouched
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+RESTORE PASS: byte-exact prior source, metadata, host restored
+SELFTEST LF PASS full apply/verify/restore, host swap, unlimited capture
+sd_boot/bb_dos622_sd.inc: 303->2634 SHA 7a2df60c3cb6
+sd_boot/bb_sd_boot.c: 271->654 SHA 29dc79518c40
+src/bb_dos622_bios.inc: 244->479 SHA 7df87ce4fba3
+src/bb_live.c: 259->2133 SHA 3e709f70308e
+src/bb_lcd_console.c: 482->3767 SHA dfb799b6b86c
+scripts/bb_live_run_dos622_swap.ps1: NEW->2383 SHA 2f97907d371c
+scripts/bb_dos622_swap_color_host.ps1: NEW->974 SHA 9a7fbce0e069
+Metadata cascade: 0 files; PROBE PASS; no edits
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+APPLIED: A/B hot-swaps, 16-color ST7796 text, unlimited F9 host console; images untouched
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+VERIFY PASS: 7 source/runner/metadata entries, backups intact
+RESTORE PASS: byte-exact prior source, metadata, host restored
+SELFTEST CRLF PASS full apply/verify/restore, host swap, unlimited capture
+SELFTEST PASS; compile/physical LCD/USB/SD hardware integration still requires user Pico test

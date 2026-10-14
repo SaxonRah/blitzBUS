@@ -58,3 +58,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File `
     -Seconds 180
 
 
+
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+    .\scripts\bb_live_run_dos622.ps1 `
+    -MicroDOS C:\microDOS `
+    -Blitz86 C:\blitz86_v2 `
+    -Port COM5 `
+    -Seconds 180 `
+    -ConsoleView Screen
+
+

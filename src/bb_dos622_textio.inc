@@ -11,6 +11,7 @@ extern bool bb_sd_dos622_active(void);
 typedef struct Bb622TextIOState {
     uint64_t sample_us;
     uint32_t row_hash[25];
+    uint32_t cell_hash[25];
     uint8_t row_visible[25];
     unsigned announced;
 } Bb622TextIOState;
@@ -48,6 +49,30 @@ static void bb622_textio_mirror(MdRuntime *rt)
             if (ch != ' ') end = col + 1u;
         }
         chars[end] = '\0';
+        /* BB_DOS622_COLOR_CELLS_V1: preserve every VGA text cell,
+         * not just printable ASCII. Character+attribute bytes are
+         * serialized atomically per changed 80-column row; CP437 and
+         * dark/bright/background color choices are decoded by the host.
+         * Snapshot is in PSRAM, not near the RP2350 SRAM limit.
+         */
+        {
+            const uint8_t *cells = p + row * 160u;
+            uint32_t cell_h = 2166136261u;
+            for (unsigned i = 0; i < 160u; ++i)
+                cell_h = (cell_h ^ cells[i]) * 16777619u;
+            if (cell_h != s->cell_hash[row]) {
+                static const char hx[] = "0123456789ABCDEF";
+                char wire[321];
+                for (unsigned i = 0; i < 160u; ++i) {
+                    wire[i * 2u] = hx[cells[i] >> 4u];
+                    wire[i * 2u + 1u] = hx[cells[i] & 15u];
+                }
+                wire[320] = '\0';
+                s->cell_hash[row] = cell_h;
+                printf("[bb622-cells] row=%02u |%s|\n", row, wire);
+            }
+        }
+
         if (h == s->row_hash[row]) continue;
         s->row_hash[row] = h;
         if (!end) {

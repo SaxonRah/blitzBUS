@@ -1,0 +1,41 @@
+{
+  "tag": "BB_DOS622_EGA_INFO_V1",
+  "files": [
+    {
+      "path": "src/bb_vga.c",
+      "backup": "backup_000.bin",
+      "original": "cffab62f399fa3742c39d52d8cac34a841e0dd7067baf14b5d5bd12b748c3368",
+      "installed": "dadc47d4ec537776e3e45f666919e828e8d478920ceddc412f54e5b3998451e4"
+    },
+    {
+      "path": ".bb_dos622_floppy_b_v1_state/manifest.json",
+      "backup": "backup_001.bin",
+      "original": "2d94a9be21b758c03a1b343d974243f15945743f2131fe5695664c5380b4d9c9",
+      "installed": "634921bb3725e84eb35f9a536af1d087deea8c3eb4fa104cb38830cf9bc07844"
+    },
+    {
+      "path": ".bb_dos622_hdd_v2_state/manifest.json",
+      "backup": "backup_002.bin",
+      "original": "aaaf2b89bf6337c84314b9891728cdc573c892b9b62f3291d5876bc6db8c8403",
+      "installed": "6117888da7c1ecbb220d4fb8e3edb838912bb91ff8ababd5b2adcdb03ada666a"
+    },
+    {
+      "path": ".bb_dos622_screen_clear_v1_state/manifest.json",
+      "backup": "backup_003.bin",
+      "original": "b696403e5c308b53d485a5dbe8fa78d94197240ac51a88e417f111b55a571b67",
+      "installed": "46cccc423877cea401e723ed606f97350cd7c9e8878736e0b9cde62162eb45cc"
+    },
+    {
+      "path": ".bb_dos622_vga0b_keys_v1_state/manifest.json",
+      "backup": "backup_004.bin",
+      "original": "39bf4f8cca136d33463ad0c6a0df2703ed712a8a8999328a15f375190c2b411e",
+      "installed": "2945f3ab0bd167ccd54fac48e11d2bacfcc0ddab3e20f1933614ed6294397439"
+    },
+    {
+      "path": ".bb_dos622_vga0b_stdio_fix_v1_state/manifest.json",
+      "backup": "backup_005.bin",
+      "original": "216a3a526842f86ca17d68636ebf67602c7e92e8b83b3a1d3cc2d9cccd2bee17",
+      "installed": "407d2332826b92c3d47e994a0ab2da6d11783e84b7d7dfde5a362bc04d34021d"
+    }
+  ]
+}

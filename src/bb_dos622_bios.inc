@@ -29,6 +29,9 @@ static void BB622_FLASH bb622_status(MdX86 *c, uint8_t status, uint8_t count)
  */
 extern bool bb_sd_dos622_b_image_ready(void);
 extern bool bb_sd_b_read_sector(uint32_t lba,uint8_t *dst,size_t size);
+/* BB_DOS622_SWAP_LCD_V2: BIOS floppy media-change notifications */
+extern bool bb_sd_dos622_take_a_change(void);
+extern bool bb_sd_dos622_take_b_change(void);
 static bool BB622_FLASH bb622_b_floppy_int13(MdRuntime *rt)
 {
     MdX86 *c=&rt->cpu;
@@ -53,7 +56,7 @@ static bool BB622_FLASH bb622_b_floppy_int13(MdRuntime *rt)
         md_x86_set_flags(c,(uint16_t)(flags&~MD_X86_FLAG_CF));
         return true;
     }
-    if(fn==0x16u) {bb622_status(c,0u,0u);return true;}
+    if(fn==0x16u) {bb622_status(c,bb_sd_dos622_take_b_change()?0x06u:0u,0u);return true;}
     if(fn==0x03u || fn==0x05u) {bb622_status(c,0x03u,0u);return true;} /* write protected */
     if(fn!=0x02u && fn!=0x04u) {bb622_status(c,0x01u,0u);return true;}
     cyl=(uint32_t)(cx>>8)|(((uint32_t)cx&0xC0u)<<2);
@@ -103,7 +106,7 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
         c->r[MD_X86_AX] = drive == 0u ? 0x0100u : 0x0000u; /* floppy / absent */
         flags = md_x86_flags(c); flags &= (uint16_t)~MD_X86_FLAG_CF;
         md_x86_set_flags(c, flags); return true; }
-    if (fn == 0x16u) { bb622_status(c, drive == 0u ? 0u : 0x80u, 0u); return true; }
+    if (fn == 0x16u) { bb622_status(c, drive == 0u ? (bb_sd_dos622_take_a_change()?0x06u:0u) : 0x80u, 0u); return true; }
     if (fn == 0x03u || fn == 0x05u) { bb622_status(c, drive == 0u ? 0x03u : 0x80u, 0u); return true; } /* read-only */
     if (fn != 0x02u && fn != 0x04u) { bb622_status(c, 0x01u, 0u); return true; }
     if (drive != 0u) { bb622_status(c, 0x80u, 0u); return true; }

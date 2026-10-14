@@ -3,17 +3,17 @@
   "files": {
     "src/bb_live.c": {
       "before": "2cbc5ce8451f14dff720303391e0991095a2f13abf4afd48a5d15b1c950fde03",
-      "after": "3883534b646fa0d5667f812020df701dfb8b66d71167a247700eb5ad3a7597f9",
+      "after": "19cfafe89e40e41f0cf9b550197407673e758460749fb3771bdbc67029a8c1d3",
       "backup": "backup_0.bin"
     },
     ".bb_dos622_ipl_v1_state/manifest.json": {
       "before": "dc10d4eb756b4e549771d80eb62722437c51043d2a19af7a7934bbbd46b229f8",
-      "after": "f069fd9b74d6cc7b24ea4a32bce2459eba30429db84ad953df729b8f2c916278",
+      "after": "af7cad88b6d442f05af27c6971a301a7012265d486e5378798e20cea3023db6c",
       "backup": "backup_1.bin"
     },
     ".bb_dos622_boot_diag_v1_state/repair.json": {
       "before": "425b5ef3a4bc26dec7581804bf0054547a98fe52465e1ee72fa6b616979929bb",
-      "after": "570421228458983f1827f88c9a3c151b67d4d89ca000e30f52b5d9b6d3a58acb",
+      "after": "6a0d57f461fb484dc9e18573a2f74a49b731bb36e0ba775fabea1b2f90552856",
       "backup": "backup_2.bin"
     }
   }

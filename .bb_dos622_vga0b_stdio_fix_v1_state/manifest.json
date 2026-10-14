@@ -5,25 +5,25 @@
       "path": "src/bb_vga.c",
       "backup": "backup_000.bin",
       "original": "011d0feacf2498c0e12c9fd23e7f714f256cc9e2008ba59b1032222351655444",
-      "installed": "cffab62f399fa3742c39d52d8cac34a841e0dd7067baf14b5d5bd12b748c3368"
+      "installed": "dadc47d4ec537776e3e45f666919e828e8d478920ceddc412f54e5b3998451e4"
     },
     {
       "path": ".bb_dos622_hdd_v2_state/manifest.json",
       "backup": "backup_001.bin",
       "original": "fa9199fe1e9569f8a964e12db7adab909252b9bf999587f81dd28b9b21053933",
-      "installed": "aaaf2b89bf6337c84314b9891728cdc573c892b9b62f3291d5876bc6db8c8403"
+      "installed": "d0a7be11574aa3d7518d2ce2e259edb39508efd86064e5e4702e6942f77204d2"
     },
     {
       "path": ".bb_dos622_screen_clear_v1_state/manifest.json",
       "backup": "backup_002.bin",
       "original": "6421d9a5d06cc5bd508338aca7f3f4406afac155d08c1f8b30466aea07d968b6",
-      "installed": "b696403e5c308b53d485a5dbe8fa78d94197240ac51a88e417f111b55a571b67"
+      "installed": "cdeb995ba4a0a6a7a43ab504d499cd6d12696c1361c161f6b843efa1dbf4bd0f"
     },
     {
       "path": ".bb_dos622_vga0b_keys_v1_state/manifest.json",
       "backup": "backup_003.bin",
       "original": "6397eda7e5720ff134eccec9537a929e04cb4acea50c0df12b4ddecf5e44a301",
-      "installed": "39bf4f8cca136d33463ad0c6a0df2703ed712a8a8999328a15f375190c2b411e"
+      "installed": "cda3323b83eaf378d1aac69b7b55969991465f34a92541c0691309817452fe4a"
     }
   ]
 }

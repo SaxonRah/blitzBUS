@@ -3,19 +3,19 @@
   "files": {
     "sd_boot/bb_sd_boot.c": {
       "original": "60aac8c84d524977451bbace761390723b27ae00833a5edd632d81555d78e8fa",
-      "installed": "ddaaff2bfc6d6d9a060d2aa294d608ff6aae6264266974f5d69486d5a4a728c9"
+      "installed": "43c3f744dd30ca9213ff41ad4c34bf525bad10f6f567389bccf55fd639858905"
     },
     "src/bb_live.c": {
       "original": "c651b0de2d29c344e7e810a1606c08a21a28130b79130810a1a75a5faca9874f",
-      "installed": "3883534b646fa0d5667f812020df701dfb8b66d71167a247700eb5ad3a7597f9"
+      "installed": "19cfafe89e40e41f0cf9b550197407673e758460749fb3771bdbc67029a8c1d3"
     },
     "sd_boot/bb_dos622_sd.inc": {
       "original": null,
-      "installed": "6537b204a69b76fbc7900c006f794f460396ae9bc4bc9f5f6d58806116eea19b"
+      "installed": "ce54fab318afb5488c535e7f29b462614175f10853701621f7d9a067b904285e"
     },
     "src/bb_dos622_bios.inc": {
       "original": null,
-      "installed": "39c20220df511cc6b47e6727a083eddfeaf08a72b095e95ba784f10400de21d8"
+      "installed": "3d0e3a9c481404a152cc336f2382bfd25930812b7406d3529a533a1188887f00"
     }
   }
 }

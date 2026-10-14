@@ -1,6 +1,10 @@
 /* BB_DOS622_IPL_V1 - optional separate MS-DOS 6.x boot floppy from SD.
    This code intentionally never modifies the established BOOT.IMG path. */
 static FIL bb622_disk;
+static FIL bb622_swap_alt;
+static FIL *bb622_swap_active=&bb622_disk;
+static unsigned bb622_swap_a_number=1u;
+static bool bb622_swap_a_changed;
 static bool bb622_disk_open;
 static uint32_t bb622_read_calls;
 static uint32_t bb622_read_errors;
@@ -32,7 +36,7 @@ bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
     /* Must be done BEFORE the first FatFs operation after LCD clock init.
        Retiming an unrelated SPI interface (SPI0 LCD) would be incorrect. */
     bb622_retime_spi1();
-    rc = f_lseek(&bb622_disk, (FSIZE_t)lba * 512u);
+    rc = f_lseek(bb622_swap_active, (FSIZE_t)lba * 512u);
     if (rc != FR_OK) {
         ++bb622_read_errors;
         if (bb622_read_errors <= 8u)
@@ -40,7 +44,7 @@ bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
                    (unsigned long)lba, (int)rc, (unsigned long)spi_get_baudrate(spi1));
         return false;
     }
-    rc = f_read(&bb622_disk, dst, 512u, &got);
+    rc = f_read(bb622_swap_active, dst, 512u, &got);
     if (rc != FR_OK || got != 512u) {
         ++bb622_read_errors;
         if (bb622_read_errors <= 8u)
@@ -51,6 +55,62 @@ bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
     }
     ++bb622_read_calls;
     if (bb622_read_calls <= 8u) printf("[bb-dos622] read lba=%lu OK\n", (unsigned long)lba);
+    return true;
+}
+
+/* BB_DOS622_SWAP_LCD_V2: floppy A media exchange, DOS622 only.
+ * Open new FAT12 image BEFORE closing old; invalid/missing leaves old intact.
+ * NOSYS on second disk is intentional: SETUP floppy 2+ has no IO.SYS.
+ */
+static bool bb622_swap_fat12_valid(const uint8_t *b)
+{
+    return b[510]==0x55u && b[511]==0xAAu &&
+        (b[0]==0xEBu || b[0]==0xE9u) &&
+        b[11]==0u && b[12]==2u && b[13]==1u &&
+        b[14]==1u && b[15]==0u && b[16]==2u &&
+        b[17]==224u && b[18]==0u &&
+        b[19]==0x40u && b[20]==0x0Bu &&
+        b[22]==9u && b[23]==0u &&
+        b[24]==18u && b[25]==0u && b[26]==2u && b[27]==0u;
+}
+bool bb_sd_dos622_take_a_change(void)
+{
+    const bool result=bb622_swap_a_changed;
+    bb622_swap_a_changed=false;
+    return result;
+}
+bool bb_sd_dos622_select_a(unsigned n)
+{
+    FIL *candidate;
+    FRESULT fr;
+    UINT got=0;
+    uint8_t bs[512];
+    char path[96];
+    if(!bb622_disk_open || n<1u || n>9u)return false;
+    if(n==bb622_swap_a_number)return true;
+    if(n==1u) {
+        if(snprintf(path,sizeof path,"0:/BLITZBUS/DOS622.IMG") >= (int)sizeof path)return false;
+    } else if(snprintf(path,sizeof path,"0:/BLITZBUS/DOS622%u.IMG",n) >= (int)sizeof path)return false;
+    bb622_retime_spi1();
+    candidate = (bb622_swap_active==&bb622_disk) ? &bb622_swap_alt : &bb622_disk;
+    fr=f_open(candidate,path,FA_READ);
+    if(fr!=FR_OK) {
+        printf("[bb622-swap] A:%u FAIL open fr=%d (previous disk retained)\n",n,(int)fr);
+        return false;
+    }
+    if(f_size(candidate)!=1474560u ||
+       f_read(candidate,bs,512u,&got)!=FR_OK || got!=512u ||
+       !bb622_swap_fat12_valid(bs)) {
+        printf("[bb622-swap] A:%u FAIL image must be 1440 KiB FAT12 (previous disk retained)\n",n);
+        (void)f_close(candidate);
+        return false;
+    }
+    (void)f_close(bb622_swap_active);
+    bb622_swap_active=candidate;
+    bb622_swap_a_number=n;
+    bb622_swap_a_changed=true;
+    printf("[bb622-swap] A:%u OK read-only; BIOS media changed\n",n);
+    fflush(stdout);
     return true;
 }
 
@@ -68,6 +128,7 @@ static void bb622_mount(const char *drive)
     uint32_t root, nroot, lba;
     FRESULT rc;
     bb622_disk_open = false;
+    bb622_swap_active=&bb622_disk;bb622_swap_a_number=1u;bb622_swap_a_changed=false;
     bb622_read_calls = bb622_read_errors = 0;
     if (snprintf(selname, sizeof selname, "%s/BLITZBUS/DOS622.TXT", drive) >= (int)sizeof selname) return;
     if (f_open(&select, selname, FA_READ) != FR_OK) return; /* opt-in only */

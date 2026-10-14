@@ -1,0 +1,8 @@
+{
+  "tag": "BB622_SWAP_CONTROLS_V1",
+  "source_sha": "4391537ca3d1cec244617fc2217b1e2eb62a544810a1539885fb9168533808e2",
+  "outputs": {
+    "scripts/bb_live_run_dos622_controls.ps1": "6dbf3e6e285f1b205c9ef63fe6bf9dd7f9f683c2bb5bfedcd33b544dbfac950c",
+    "scripts/bb622_request_disk.ps1": "29d5e95a7a94efc6f1d8a3b78f8ac752807c792722dd7d411830488c429b3917"
+  }
+}

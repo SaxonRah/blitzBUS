@@ -1,0 +1,29 @@
+{
+  "tag": "BB_DOS622_VGA0B_STDIO_FIX_V1",
+  "files": [
+    {
+      "path": "src/bb_vga.c",
+      "backup": "backup_000.bin",
+      "original": "011d0feacf2498c0e12c9fd23e7f714f256cc9e2008ba59b1032222351655444",
+      "installed": "dadc47d4ec537776e3e45f666919e828e8d478920ceddc412f54e5b3998451e4"
+    },
+    {
+      "path": ".bb_dos622_hdd_v2_state/manifest.json",
+      "backup": "backup_001.bin",
+      "original": "fa9199fe1e9569f8a964e12db7adab909252b9bf999587f81dd28b9b21053933",
+      "installed": "9ff69ff66d012694ed1039f04fffde12613a8cfb984c830f68ec2fb9b49ba809"
+    },
+    {
+      "path": ".bb_dos622_screen_clear_v1_state/manifest.json",
+      "backup": "backup_002.bin",
+      "original": "6421d9a5d06cc5bd508338aca7f3f4406afac155d08c1f8b30466aea07d968b6",
+      "installed": "80941df02ff11e6e9fbb368b5973643ce15204439db2d064787e3c1cb87f228d"
+    },
+    {
+      "path": ".bb_dos622_vga0b_keys_v1_state/manifest.json",
+      "backup": "backup_003.bin",
+      "original": "6397eda7e5720ff134eccec9537a929e04cb4acea50c0df12b4ddecf5e44a301",
+      "installed": "16e368fbcc072fc21da3485bfb5f4b69f84256fd8465207559c45c56b6281eb9"
+    }
+  ]
+}

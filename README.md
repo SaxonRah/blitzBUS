@@ -1,54 +1,94 @@
-# blitzBUS DOS 6.22 / 386 audit + clean interactive console
+# blitzBUS DOS 6.22 — swap console controls V1 + V2.2 Windows self-test
 
-**This package does not modify C source, DOS image files or installed checksum manifests.** It generates a new PowerShell runner in `scripts/` and preserves the original one. It also includes a read-only log analyzer and a development roadmap.
+This is a **host-only correction** for an *already installed* `BB_DOS622_SWAP_LCD_V2` layer. It doesn't modify `src`, `sd_boot`, the pre-existing PowerShell runners, older state/repair manifests, or SD media. Don't restore/reinstall your working DOS 6.22 firmware.
 
-## Install the host-only clean DOS console
+## What happened
 
-Copy `bb_make_dos622_clean_console.py` and `bb_dos622_screen_host.ps1` into `C:\blitzBUS` (same directory). Run:
+1. `bb_dos622_swap_lcd_v2_1.py selftest` fails at the final historic-SD-clockfix metadata test **on Windows only**. The test builds a key such as `.bb_dos622_sd_clockfix_v1_state\\repair.json`, but V2.1 compares it to a forward-slash string. The new `bb_dos622_swap_lcd_v2_2.py` normalizes separators for that one *known* schema. This doesn't change installed files or historical SHA-256 values. V2.2 `selftest` and `verify` are appropriate; `probe`/`apply` are **not** because V2 is already installed.
+2. F9 can be intercepted by Windows consoles (and the original menu's feedback only appears in the title bar). The new **separate** runner accepts both F9 and Ctrl+G, and reads a disk-swap request file from `logs` so a second PowerShell window can direct A: or B: disk swaps even when the key never arrives.
+
+## Copy into `C:\blitzBUS`
+
+- `bb622_swap_controls_fix_v1.py`
+- `bb_dos622_swap_lcd_v2_2.py`
+
+Keep the installed V2.1 script, `bb_dos622_atbios_v1.py`, `bb_dos622_color_host.ps1`, all previous runners, all manifests, and all SD card files. **Do not overwrite them.**
+
+## Verify old installed state
 
 ```powershell
 cd C:\blitzBUS
-python .\bb_make_dos622_clean_console.py selftest
-python .\bb_make_dos622_clean_console.py probe
-python .\bb_make_dos622_clean_console.py apply
-python .\bb_make_dos622_clean_console.py verify
+python .\bb_dos622_swap_lcd_v2_2.py selftest
+python .\bb_dos622_swap_lcd_v2_2.py verify
+python .\bb_dos622_lineage_verify_v10.py verify
 ```
 
-The original `scripts\bb_live_run.ps1` remains untouched. A new `scripts\bb_live_run_dos622.ps1` is generated, plus `scripts\bb_dos622_screen_host.ps1` and a SHA state file. If the original source has changed too much, `probe` refuses to proceed rather than guessing.
+The old script is replaced **only as a CLI entry point** with V2.2 when you want to verify/test. V2.2 uses the original `.bb_dos622_swap_lcd_v2_state` directory and does not create another install layer.
 
-Use your existing environment settings (`BB_CPU=286`, `BB_SD_BOOT=1`, etc.) and run:
+## Generate the independent runner
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bb_live_run_dos622.ps1 `
-    -MicroDOS C:\microDOS `
-    -Blitz86 C:\blitz86_v2 `
-    -Port COM5 `
-    -Seconds 180 `
-    -ConsoleView Screen
+python .\bb622_swap_controls_fix_v1.py selftest
+python .\bb622_swap_controls_fix_v1.py probe
+python .\bb622_swap_controls_fix_v1.py apply
+python .\bb622_swap_controls_fix_v1.py verify
 ```
 
-`-ConsoleView Screen` redraws the 25 guest DOS text rows in-place; `Events` suppresses the screen and shows key diagnostics; `Raw` retains the unfiltered original output. Serial keyboard input and Ctrl+X exit remain owned by the existing runner. **The original raw CDC transcript is still written to `logs\bb-live-*-console.txt` in all modes.** Build and flash progress still displays normally before guest-screen takeover. This changes display, not the firmware's volume of USB printf traffic; fixing firmware log-level gating is recommended next.
+That creates exactly two new files:
 
-If your PowerShell console does not support cursor-positioning, the tool will report a fallback warning. Use a regular Windows 10 PowerShell console with at least 80 columns; 100×30 is preferable. Running inside an IDE's redirected terminal may prevent `[Console]::KeyAvailable`, just as it does with the original runner.
+- `scripts\bb_live_run_dos622_controls.ps1`
+- `scripts\bb622_request_disk.ps1`
 
-Rollback **only the generated files**:
+It checks the original swap runner against the installed manifest before generating them. The source runner and installed checksum manifests do **not** change, and a separate exact-output checksum manifest is recorded in `.bb622_swap_controls_v1_state`.
+
+## Run the new unlimited console
 
 ```powershell
-python .\bb_make_dos622_clean_console.py restore
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+  .\scripts\bb_live_run_dos622_controls.ps1 `
+  -MicroDOS C:\microDOS `
+  -Blitz86 C:\blitz86_v2 `
+  -Port COM5 -Seconds 0 -ConsoleView Screen
 ```
 
-## Offline audit of logs / readable last DOS screen
+`-Seconds 0` stays connected until Ctrl+X. This command retains the existing color/CP437 screen and logs everything in `logs\bb-live-*-console.txt`. It normally rebuilds/flashes as before. To **attach to an already running Pico without resetting it**, also pass `-NoBuild -NoFlash`, but note: the color console only receives *changes* to the guest screen, so it may show blank/partial rows until DOS updates the screen.
+
+## Swap disks (two independent methods)
+
+**Method 1 — in the main DOS console:** **Ctrl+G**, then **A**, then **2**. F9 continues to work if Windows delivers it. For Descent disk 3, use **Ctrl+G**, **B**, **3**. The number sends the command immediately. Wait for an `A:2 OK` / `B:3 OK` acknowledgement before pressing Enter inside the DOS installer.
+
+**Method 2 — in a *second* PowerShell window** (does not open COM5 and is not affected by function-key interception):
 
 ```powershell
-python .\bb_dos622_log_audit.py .\logs\bb-live-YYYYMMDD-HHMMSS-console.txt `
-    --screen-output .\logs\last_dos_screen.txt `
-    --json-output .\logs\last_dos_audit.json
+cd C:\blitzBUS
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bb622_request_disk.ps1 -Drive A -Disk 2
 ```
 
-The analyzer reads the raw transcript, reconstructs the last observed 25 text rows, and lists significant failures and noisy tag counts. It never edits the input log. Existing sample output is included for the latest submitted log.
+For Descent disk 3:
 
-Read `DOS622_386_CAPABILITY_AUDIT_2026-10-14.md` for verified support, the next missing EGA BIOS query, minimum Descent requirements and the subsystem milestone plan.
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bb622_request_disk.ps1 -Drive B -Disk 3
+```
 
-## Validation status
+The active DOS runner polls `logs\bb622-swap.request`, removes it, and forwards the same three-byte private request to the already-installed Pico firmware (`0x1C`, drive, number). Firmware confirms via `[bb622-swap] A:2 OK ...` or `FAIL ...` in the raw transcript. To monitor acknowledgements from the second window:
 
-The Python installer passed temporary LF and CRLF source round-trips, raw-transcript preservation checks, SHA-verified generated-file checks, and exact restore checks. The log auditor was run successfully on the latest user-supplied full transcript. **PowerShell live serial rendering has not yet been tested on the physical Pico/Windows console.** The original runner is always available for fallback.
+```powershell
+Get-Content (Get-ChildItem .\logs\bb-live-*-console.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Wait -Tail 20
+```
+
+**Never press Enter on the DOS disk prompt before `OK`.** `DOS6222.IMG` / `DESCENT3.IMG` must exist under `BLITZBUS\` on the microSD (each exactly 1,474,560 bytes). The existing A image is read-only and a failed swap retains the old image.
+
+## Rollback
+
+```powershell
+python .\bb622_swap_controls_fix_v1.py verify
+python .\bb622_swap_controls_fix_v1.py restore
+```
+
+This removes **only** the two new host scripts and their independent state directory; it does not modify the already working V2 layer, your DOS images, or any previous checksum record.
+
+## Validation and limitations
+
+- Host-only installer LF and CRLF self-tests passed, including original-runner SHA precondition and byte-exact rollback.
+- V2.2 self-test passed on Linux with an explicit simulated Windows-backslash repair-path regression and LF/CRLF cascade tests. PowerShell cannot be executed in this Linux test runtime, so live Ctrl+G/F9 and file-swap commands still require a Windows + Pico session.
+- This intentionally does *not* reflash, replace firmware, edit LCD driver, alter the 80x25 color display, or make C: bootable. It fixes the actual host control and misleading regression-test problems.

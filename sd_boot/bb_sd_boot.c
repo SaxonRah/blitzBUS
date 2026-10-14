@@ -17,6 +17,7 @@
 #define BB_SD_SECTOR 512u
 static FIL bb_b_img;
 static bool bb_b_open;
+static bool bb622_swap_b_changed;
 static unsigned bb_b_number;
 static FIL bb_c_img;
 static bool bb_c_open;
@@ -46,6 +47,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     unsigned offset;
 
     bb_b_open = false;
+    bb622_swap_b_changed=false;
     bb_b_number = 0u;
     bb_c_open = false;
     bb_c_cache_reset();
@@ -390,6 +392,14 @@ bool bb_sd_b_read_sector(uint32_t sector, uint8_t *data, size_t size)
     return true;
 }
 
+/* BB_DOS622_SWAP_LCD_V2: track successful B media replacements for BIOS AH=16h. */
+bool bb_sd_dos622_take_b_change(void)
+{
+    bool changed=bb622_swap_b_changed;
+    bb622_swap_b_changed=false;
+    return changed;
+}
+
 /* BB_DESCENT_LIVESWAP_V1. Called only by the emulator's INT F6 service. */
 bool bb_sd_b_select(unsigned selected)
 {
@@ -409,6 +419,7 @@ bool bb_sd_b_select(unsigned selected)
     if (fr==FR_OK && f_size(&bb_b_img)==(FSIZE_t)1474560u) {
         bb_b_open=true;
         bb_b_number=selected;
+        if(bb_sd_dos622_active())bb622_swap_b_changed=true; /* BB_DOS622_SWAP_LCD_V2 */
         printf("[bb-sd-b] LIVE SWITCH B: disk=%u OK\n",selected);
         return true;
     }
