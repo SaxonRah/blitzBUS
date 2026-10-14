@@ -1,0 +1,15 @@
+{
+  "tag": "BB_DOS622_BOOT_DIAG_V1",
+  "files": {
+    "src/bb_live.c": {
+      "old": "5a82b7731cb8c9bb2a61b4c48bdd7932d664736a765428249493f1ca01638a71",
+      "new": "102a98bdbfe91921e63e767c9922835ec48efef4667ae7ff5854f0582a6b7444"
+    },
+    "src/bb_dos622_bios.inc": {
+      "old": "b49255796029d460b0b590b1bd740bc481711460b453a0e61d69ec9eb87e193a",
+      "new": "13e267763f6c51d9513de6e84524c26fd211477a53f8211865dc9df897510cb6"
+    }
+  },
+  "parent_before": "198385ec4f46171b16d86f3b5c3d43d152cc85c8c03a2c18571b23ec8e9a5d6d",
+  "parent_after": "4fa02f42947571b016fb7b4bfc9c81fd25a45b0b4b715e7096bb5bcd63a7b4af"
+}

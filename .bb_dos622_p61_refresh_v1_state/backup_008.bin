@@ -1,0 +1,45 @@
+{
+  "tag": "BB_DOS622_RTC1A_V1",
+  "files": {
+    "src/bb_dos622_bios.inc": {
+      "old": "13e267763f6c51d9513de6e84524c26fd211477a53f8211865dc9df897510cb6",
+      "new": "9393d2aba3d03363f9a8f38e25c6245610666fde9cfe2d63f2bd201211e29a02",
+      "backup": "original_0.bin"
+    },
+    "src/bb_dos622_rtc1a.inc": {
+      "old": null,
+      "new": "2adde4319614cd2b6918bd03918cfac871c2324e11b8e08d84903ddf48aa111f",
+      "backup": "original_1.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "old": "4fa02f42947571b016fb7b4bfc9c81fd25a45b0b4b715e7096bb5bcd63a7b4af",
+      "new": "2156a1a4765bb9be1fc35fae0c1f8f4e3b1ebc1bc856117810a193f6d9d0600a",
+      "backup": "original_2.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "old": "ffe1d25d206709064f189af65e5464998b6029b07e30103bf0aeb0feacb8b276",
+      "new": "1c07e504140a1f0b4bf953895085ea65bd36ece2b80af09679759640f185d27f",
+      "backup": "original_3.bin"
+    },
+    ".bb_dos622_heap_rescue_v1_state/manifest.json": {
+      "old": "4ab46a334b8c91eecda3038e911812429e0204bade1b13a233caba9fee5ee077",
+      "new": "2d0977a4125b26da619af594d68f40b65af0651256323edcb5d457da3cacd6cb",
+      "backup": "original_4.bin"
+    },
+    ".bb_dos622_stall_watch_v1_state/manifest.json": {
+      "old": "e2f7360f135464a36ac1684e4dfc3cfdec17b3172ac6f511c583b12756a8b279",
+      "new": "02951ba48618cf2b8350a7653868c8c0418ce90b6b4b01fa885cc939bac10db5",
+      "backup": "original_5.bin"
+    },
+    ".bb_dos622_serial14_guard_v1_state/manifest.json": {
+      "old": "c84f915dccff8c1377bdccc128032db0dd0e9cff87dd8a0b1789a72e5d90af9b",
+      "new": "41b86bd2572f2e6e39cebb40793886b2940e74d84cd8c3a488fd9effcd2ad4ee",
+      "backup": "original_6.bin"
+    },
+    ".bb_dos622_printer17_v1_state/manifest.json": {
+      "old": "f633e728170e6223c0fecfc4530efb37ca5ebdb0b1dce23f6b6368dcb1c40605",
+      "new": "2d7f6531cd6ab14ac8bdf5234a8a57bd0770205f35a76cb3adde16e7146efb3f",
+      "backup": "original_7.bin"
+    }
+  }
+}

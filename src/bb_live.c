@@ -161,7 +161,28 @@ static BbLiveStats st;
    bytes get MD_X86_PAGE_TRBYTES and a bitmap of the covered bytes, so a
    microDOS store bumps the page generation only if it hits translated code */
 static uint8_t *trbits[MD_X86_CODE_PAGE_COUNT];
+/* BB_DOS622_HEAP_RESCUE_V1; BB_DOS622_SRAM_FLOOR_V1.
+ * All translated-byte bitmaps live in PSRAM for DOS622 bring-up.
+ * Each bitmap is explicitly zeroed when first assigned, as before.
+ * BB_TR_HOT_PAGES can later be raised for a measured performance build.
+ * No changes to BB_CODE_BYTES, JIT engine, or CPU instruction semantics. */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#ifndef BB_TR_HOT_PAGES
+#define BB_TR_HOT_PAGES 0u
+#endif
+#if BB_TR_HOT_PAGES > BB_TR_PAGES
+#error "BB_TR_HOT_PAGES exceeds BB_TR_PAGES"
+#endif
+#if BB_TR_HOT_PAGES > 0u
+static uint8_t trpool[BB_TR_HOT_PAGES][MD_X86_CODE_PAGE_SIZE / 8u] __attribute__((aligned(4)));
+#endif
+#if BB_TR_PAGES > BB_TR_HOT_PAGES
+static uint8_t __uninitialized_psram("bb_trpool_cold")
+    trpool_cold[BB_TR_PAGES - BB_TR_HOT_PAGES][MD_X86_CODE_PAGE_SIZE / 8u] __attribute__((aligned(4)));
+#endif
+#else
 static uint8_t trpool[BB_TR_PAGES][MD_X86_CODE_PAGE_SIZE / 8u] __attribute__((aligned(4)));
+#endif
 static unsigned trpool_used;
 static uint8_t want_flags[MD_X86_CODE_PAGE_COUNT];
 static uint8_t tracked[MD_X86_CODE_PAGE_COUNT];     /* pages with any flag, in order */
@@ -208,7 +229,19 @@ B86_HOT static void code_hook(B86Cpu *c, uint32_t lin, uint32_t len)
         if (trbits[p] == NULL && !(want_flags[p] & MD_X86_PAGE_TRANSLATED)) {
             if (want_flags[p] == 0) tracked[ntracked++] = (uint8_t)p;
             if (trpool_used < BB_TR_PAGES) {
-                trbits[p] = trpool[trpool_used++];
+                #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#if BB_TR_HOT_PAGES > 0u && BB_TR_PAGES > BB_TR_HOT_PAGES
+                trbits[p] = trpool_used < BB_TR_HOT_PAGES ? trpool[trpool_used]
+                            : trpool_cold[trpool_used - BB_TR_HOT_PAGES];
+#elif BB_TR_HOT_PAGES > 0u
+                trbits[p] = trpool[trpool_used];
+#else
+                trbits[p] = trpool_cold[trpool_used];
+#endif
+#else
+                trbits[p] = trpool[trpool_used];
+#endif
+                ++trpool_used;
                 memset(trbits[p], 0, MD_X86_CODE_PAGE_SIZE / 8u);
                 want_flags[p] |= MD_X86_PAGE_TRBYTES;
             } else {
@@ -798,8 +831,15 @@ static void bb_v39_psram_calibrate(void)
 }
 #endif
 static void bb_v33_stats_now(void);
+/* BB_DOS622_TEXTIO_V1 - input + text output only for real DOS 6.22 */
+#include "bb_dos622_textio.inc"
 static void bb_v23_poll_input(void) {
-    if(!bb_video_seen||!R)return;
+    if (!R) return;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if (!bb_video_seen && !bb_sd_dos622_active()) return;
+#else
+    if (!bb_video_seen) return;
+#endif
     ++bb_v23_polls;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     /* Avoid draining multiple characters during a single guest slice. */
@@ -828,6 +868,38 @@ static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
                             uint16_t *ip, uint8_t *rewind)
 {
     uint8_t ah=(uint8_t)(*ax>>8);
+    /* BB_DOS622_KEYBA2_V3: DOS 5+/6.x KEYB's undocumented 122-key capability probe.
+       Ordinary enhanced keyboard: do not advertise AH=20h..22h services.
+       Preserve AX, FLAGS, other registers, IP, and rewind. */
+    if (ah == 0xA2u) {
+        extern bool bb_sd_dos622_active(void);
+        if (bb_sd_dos622_active()) {
+            static unsigned bb622_keyba2_seen;
+            if (bb622_keyba2_seen++ == 0u) {
+                printf("[bb622-keyba2] KEYB INT16/AH=A2 unsupported 122-key; AX=%04X preserved\n",
+                       (unsigned)*ax);
+                fflush(stdout);
+            }
+            return 1;
+        }
+    }
+    /* BB_DOS622_KEYB92_V1: MS-DOS KEYB probes IBM enhanced keyboard with
+       an undocumented INT 16h/AH=92h. IBM AT-compatible BIOS returns
+       AH=80h by falling through its decrement chain. Do not simply
+       reject this probe: KEYB requires the exact IBM BIOS result. */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if (ah == 0x92u && bb_sd_dos622_active()) {
+        const uint16_t in_ax = *ax;
+        static unsigned probes;
+        *ax = (uint16_t)((in_ax & 0x00FFu) | 0x8000u);
+        if (++probes <= 4u) {
+            printf("[bb622-keyb92] KEYB INT16/AH=92 in-ax=%04X out-ax=%04X (IBM enhanced keyboard)\n",
+                   (unsigned)in_ax, (unsigned)*ax);
+            fflush(stdout);
+        }
+        return 1;
+    }
+#endif
     uint16_t head,tail;
     if (ah!=0x00u && ah!=0x01u && ah!=0x02u && ah!=0x10u && ah!=0x11u && ah!=0x12u) return 0;
     bb_v23_poll_input();
@@ -844,6 +916,11 @@ static int bb_v22_keyboard(uint8_t *m, uint16_t *ax, uint16_t *flags,
         }
     } else {
         *ax=bb_v22_word(m,0x400u+head);
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+        if (bb_sd_dos622_active() && (ah==0u || ah==0x10u)) {
+            printf("[bb622-key-ab] consumed AX=%04X head=%04X tail=%04X\n", (unsigned)*ax, (unsigned)head, (unsigned)tail); fflush(stdout);
+        }
+#endif
         *flags &= (uint16_t)~0x0040u;
         if (ah==0x00u || ah==0x10u) {
             uint16_t next=(uint16_t)(head+2u);
@@ -1090,6 +1167,58 @@ static void bb_v40_release(const char *why) { (void)why; }
 static void bb_v40_tick(void) {}
 #endif
 
+/* BB_DOS622_VGA12_34_V1: DOS 6.22 VGA cursor emulation compatibility.
+   INT 10h AH=12h BL=34h AL=0/1 => return AL=12h on VGA support.
+   Existing VGA cursor shape handling remains in bb_vga_int10. */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+extern bool bb_sd_dos622_active(void);
+static int bb622_vga12_34(uint16_t *ax, uint16_t bx)
+{
+    if (!bb_sd_dos622_active()) return 0;
+    if ((*ax >> 8) != 0x12u || (bx & 0x00ffu) != 0x34u || (*ax & 0x00ffu) > 1u) return 0;
+    static uint8_t cursor_emulation = 1u;
+    static unsigned calls;
+    cursor_emulation = (uint8_t)((*ax & 0xffu) == 0u);
+    *ax = (uint16_t)((*ax & 0xff00u) | 0x12u);
+    if (++calls <= 8u) {
+        printf("[bb622-vga12] INT10 AH=12 BL=34 cursor_emulation=%u out-ax=%04X\n",
+               (unsigned)cursor_emulation, (unsigned)*ax);
+        fflush(stdout);
+    }
+    return 1;
+}
+#else
+static int bb622_vga12_34(uint16_t *ax, uint16_t bx)
+{ (void)ax; (void)bx; return 0; }
+#endif
+
+/* BB_DOS622_VGA12_30_V1: VGA alternate scan-line selection.
+   INT 10h AH=12h BL=30h AL=02 selects 400 lines for the NEXT
+   text mode set, consistent with the emulated 80x25 mode 03h.
+   Other scan-line codes need display geometry support before advertising. */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+extern bool bb_sd_dos622_active(void);
+static int bb622_vga12_30(uint16_t *ax, uint16_t bx)
+{
+    if (!bb_sd_dos622_active()) return 0;
+    if ((*ax >> 8) != 0x12u || (bx & 0xffu) != 0x30u || (*ax & 0xffu) != 2u) return 0;
+    static unsigned calls;
+    *ax = (uint16_t)((*ax & 0xff00u) | 0x12u);
+    if (++calls <= 8u) {
+        printf("[bb622-vga1230] INT10 AH=12 BL=30 scanlines=%u next-mode out-ax=%04X\n",
+               400u,
+               (unsigned)*ax);
+        fflush(stdout);
+    }
+    return 1;
+}
+#else
+static int bb622_vga12_30(uint16_t *ax, uint16_t bx)
+{ (void)ax; (void)bx; return 0; }
+#endif
+
+/* BB_DOS622_ATBIOS_V1: DOS622 AT/VGA text compatibility */
+#include "bb_dos622_atbios_v1.inc"
 static unsigned bb_v61_events;
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
@@ -1144,7 +1273,7 @@ B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
         uint16_t cx=(uint16_t)c->r[B86_CX], dx=(uint16_t)c->r[B86_DX];
         uint16_t f=b86_get_flags(c);
         uint16_t es=(uint16_t)c->seg[B86_ES], bp=(uint16_t)c->r[B86_BP];
-        if (bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f)) {
+        if (bb622_vga12_34(&ax,bx) || bb622_vga12_30(&ax,bx) || bb622_at_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f) || bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&f)) {
             if ((uint8_t)(ax >> 8) == 0u && (uint8_t)ax == 0x13u) {
                 bb_video_seen=1u;
                 bb_v24_start_us=bb_now_us();
@@ -1263,6 +1392,31 @@ static MdPortIn8Hook bb_v35_original_in8;
 static MdPortOut8Hook bb_v35_original_out8;
 static uint8_t bb_v35_pit_in8(MdRuntime *rt,uint16_t port,void *user) {
     uint8_t v=0;
+    /* BB_DOS622_P61_REFRESH_V1: PC/AT port 61h bit4 is DRAM-refresh status.
+       Approximate one bit4 transition per 15 microseconds. Retain the
+       previous hook's other 7 bits and do not alter DOS2. Both native
+       blitz86 and the microDOS interpreter reach this I/O wrapper. */
+    if (port == 0x61u) {
+        extern bool bb_sd_dos622_active(void);
+        if (bb_sd_dos622_active()) {
+            const uint64_t us = bb_now_us();
+            const uint8_t oldv = bb_v35_original_in8 ?
+                bb_v35_original_in8(rt, port, user) : 0xffu;
+            const uint8_t refresh = (uint8_t)(((us / 15u) & 1u) << 4);
+            const uint8_t value = (uint8_t)((oldv & 0xefu) | refresh);
+            static unsigned transitions;
+            static uint8_t previous = 0xffu;
+            if (previous != refresh && transitions < 8u) {
+                ++transitions;
+                printf("[bb622-p61] read=%u refresh=%u raw=%02X value=%02X us=%llu\n",
+                       transitions, (unsigned)(refresh != 0u),
+                       (unsigned)oldv, (unsigned)value, (unsigned long long)us);
+                fflush(stdout);
+            }
+            previous = refresh;
+            return value;
+        }
+    }
     if(bb_irq36_in(port,&v))return v;
     if(bb_pit_in(port,&v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return v;
     return bb_v35_original_in8?bb_v35_original_in8(rt,port,user):0xffu;
@@ -1293,7 +1447,7 @@ static bool bb_v15_interrupt(MdRuntime *rt, uint8_t vector, void *user)
         uint16_t cx=cpu->r[1], dx=cpu->r[2];
         uint16_t es=cpu->es, bp=cpu->r[5];
         uint16_t flags=md_x86_flags(cpu);
-        if (bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&flags)) {
+        if (bb622_vga12_34(&ax,bx) || bb622_vga12_30(&ax,bx) || bb622_at_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&flags) || bb_vga_int10(&ax,&bx,&cx,&dx,&es,&bp,&flags)) {
             cpu->r[0]=ax; cpu->r[3]=bx;
             cpu->r[1]=cx; cpu->r[2]=dx;
             cpu->r[5]=bp; cpu->es=es;
@@ -1311,6 +1465,8 @@ static bool bb_v15_interrupt(MdRuntime *rt, uint8_t vector, void *user)
 }
 
 /* BB_DOS622_IPL_V1 - initial BIOS implementation lives in flash */
+/* BB_DOS622_STALL_WATCH_V1 */
+#include "bb_dos622_stall_watch.inc"
 #include "bb_dos622_bios.inc"
 
 static int start(MdRuntime *rt)
@@ -1373,7 +1529,16 @@ static int start(MdRuntime *rt)
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     /* BB_DOS622_IPL_V1: boot a real disk only when DOS622.TXT = 1. */
     if (bb_sd_dos622_active()) {
+#ifndef BB622_IRQ0_AB_DISABLE
+#define BB622_IRQ0_AB_DISABLE 1
+#endif
         bb_v15_original_interrupt = bb622_bios_interrupt;
+#if BB622_IRQ0_AB_DISABLE
+        printf("[bb622-irq0-ab] IRQ0 delivery SUPPRESSED for DOS622 ONLY (diagnostic, not final fix)\n"); fflush(stdout);
+#else
+        printf("[bb622-irq0-ab] IRQ0 delivery ENABLED for DOS622 (control)\n"); fflush(stdout);
+#endif
+        bb622_textio_reset(); /* BB_DOS622_TEXTIO_PSRAM_V1 */
         printf("[bb622-diag] 10 before.dos622_boot\n"); fflush(stdout);
         if (!bb622_boot_floppy(rt)) {
             failed = 1; fail_reason = "DOS622 sector read failed"; return 0;
@@ -1577,9 +1742,18 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (R == NULL && !start(rt)) return 0;
     /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
     bb_v23_poll_input();
+    bb622_textio_mirror(rt);
     bb_diag_slice();                      /* v42: watchdog + last guest CS:IP */
     bb_v25_bios_time();
-    if(rt==R)bb_irq36_dispatch(rt,bb_now_us());
+    bb622_watch_slice(rt);
+    /* BB_DOS622_IRQ0_ISOLATION_V1: A/B test native IRQ0 guest-stack delivery */
+    if (rt == R) {
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && BB622_IRQ0_AB_DISABLE
+        if (!bb_sd_dos622_active()) bb_irq36_dispatch(rt, bb_now_us());
+#else
+        bb_irq36_dispatch(rt, bb_now_us());
+#endif
+    }
     if (rt == R && rt->cpu.cs == bios_seg) bb_v40_release("BIOS segment");
     if (rt != R || rt->cpu.cs == bios_seg) {
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {

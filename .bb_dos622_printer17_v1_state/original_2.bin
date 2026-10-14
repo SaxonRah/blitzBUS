@@ -1,0 +1,21 @@
+{
+  "tag": "BB_DOS622_IPL_V1",
+  "files": {
+    "sd_boot/bb_sd_boot.c": {
+      "original": "60aac8c84d524977451bbace761390723b27ae00833a5edd632d81555d78e8fa",
+      "installed": "10864477af31c5a496b8a3f5b57e14107f98c2b65e794428ad67e168058ad1c3"
+    },
+    "src/bb_live.c": {
+      "original": "c651b0de2d29c344e7e810a1606c08a21a28130b79130810a1a75a5faca9874f",
+      "installed": "102a98bdbfe91921e63e767c9922835ec48efef4667ae7ff5854f0582a6b7444"
+    },
+    "sd_boot/bb_dos622_sd.inc": {
+      "original": null,
+      "installed": "6537b204a69b76fbc7900c006f794f460396ae9bc4bc9f5f6d58806116eea19b"
+    },
+    "src/bb_dos622_bios.inc": {
+      "original": null,
+      "installed": "624b9d1b4d895ba87707497ea25c48343b678ac405a442b579e0dd51871b8e51"
+    }
+  }
+}

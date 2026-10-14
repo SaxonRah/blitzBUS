@@ -1,0 +1,40 @@
+{
+  "tag": "BB_DOS622_PRINTER17_V1",
+  "files": {
+    "src/bb_dos622_bios.inc": {
+      "old": "624b9d1b4d895ba87707497ea25c48343b678ac405a442b579e0dd51871b8e51",
+      "new": "9393d2aba3d03363f9a8f38e25c6245610666fde9cfe2d63f2bd201211e29a02",
+      "backup": "original_0.bin"
+    },
+    "src/bb_dos622_printer17.inc": {
+      "old": null,
+      "new": "cc2fbbbf958c25066f250ffe3c29e5879cfa40d8915c54edf4b5ca7cc0e12ec3",
+      "backup": "original_1.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "old": "39b0cac8497666d460ac660211fb2f03b131d692cca62027b698eb93814f5bd7",
+      "new": "02a7d45c4ece81051c1c667d39c107d257b7143a22ec7562d1401e92532dbffe",
+      "backup": "original_2.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "old": "735fd531858a5144c2e0a217c65ae57919c37e6da30d7817197b896ca4926eb7",
+      "new": "587be9cba3368d1298f04bdf74c43fe67556afcf0f3f7ea152108364ac9badab",
+      "backup": "original_3.bin"
+    },
+    ".bb_dos622_heap_rescue_v1_state/manifest.json": {
+      "old": "d3d93efa601dcea0544ea7eba924d684c61cb93aa8e08e1d6daba9e542e7ddcf",
+      "new": "3025305e32a85f8fa13045f7d3e657dfea3766d05d238eed78f90145b7180592",
+      "backup": "original_4.bin"
+    },
+    ".bb_dos622_stall_watch_v1_state/manifest.json": {
+      "old": "00baf4ea1487804267aded74de76fdd637781d7720472e2e09394fdaf50e532d",
+      "new": "f04e3f68ee87ae6994bb531002204522278402c0041ea58c3a5447964bd11416",
+      "backup": "original_5.bin"
+    },
+    ".bb_dos622_serial14_guard_v1_state/manifest.json": {
+      "old": "13f74e35d31c7cb4bcb69666fd6270166dd0d0fb4186d2b339a1ed8e47c01925",
+      "new": "d4ba658521b6e5cf397a506b53abf766c9b90cd52d4c9c7283a655ee73f972fc",
+      "backup": "original_6.bin"
+    }
+  }
+}

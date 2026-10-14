@@ -20,9 +20,13 @@ static void BB622_FLASH bb622_status(MdX86 *c, uint8_t status, uint8_t count)
     bb622_disk_status = status;
 }
 
+/* BB_DOS622_HDD_V1: BIOS 80h service */
+#include "bb_dos622_hdd_bios_v1.inc"
+
 static bool BB622_FLASH bb622_int13(MdRuntime *rt)
 {
     MdX86 *c = &rt->cpu;
+    if ((uint8_t)c->r[MD_X86_DX] == 0x80u) return bb622_hd_int13(rt); /* BB_DOS622_HDD_V1 */
     const uint16_t ax = c->r[MD_X86_AX], cx = c->r[MD_X86_CX], dx = c->r[MD_X86_DX];
     const uint8_t fn = (uint8_t)(ax >> 8), count = (uint8_t)ax, drive = (uint8_t)dx;
     uint32_t lba, cylinder, sector, head, i;
@@ -74,10 +78,20 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
     return true;
 }
 
+/* BB_DOS622_SERIAL14_GUARD_V1 */
+#include "bb_dos622_serial14.inc"
+/* BB_DOS622_PRINTER17_V1 */
+#include "bb_dos622_printer17.inc"
+/* BB_DOS622_RTC1A_V1 */
+#include "bb_dos622_rtc1a.inc"
+/* BB_DOS622_STALL_WATCH_V1 */
 static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void *user)
 {
     MdX86 *c = &rt->cpu;
+    bb622_watch_bios(rt, vector);
     switch (vector) {
+    case 0x14u: return bb622_serial14(rt);
+    case 0x17u: return bb622_printer17(rt);
     case 0x13u: return bb622_int13(rt);
     case 0x11u: c->r[MD_X86_AX] = 0x0021u; return true; /* CGA, floppy */
     case 0x12u: c->r[MD_X86_AX] = 640u; return true;
@@ -91,6 +105,9 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
         md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) | MD_X86_FLAG_CF));
         return true;
     case 0x1Au:
+        if ((c->r[MD_X86_AX] >> 8) >= 0x02u &&
+            (c->r[MD_X86_AX] >> 8) <= 0x07u)
+            return bb622_rtc_int1a(rt);
         if ((c->r[MD_X86_AX] >> 8) == 0x00u) {
             c->r[MD_X86_CX] = md_x86_read16(c, 0x0040u, 0x006Eu);
             c->r[MD_X86_DX] = md_x86_read16(c, 0x0040u, 0x006Cu);
@@ -111,7 +128,10 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
     }
     /* Important: do not claim DOS's INT 21h here. The real MSDOS.SYS
        must install and execute its own DOS API interrupt vectors. */
-    return md_msdos2_boot_interrupt(rt, vector, user);
+    bb622_watch_ivt(rt, vector);
+    if (md_msdos2_boot_interrupt(rt, vector, user)) return true;
+    if (bb622_null_firmware_vector(rt, vector)) return true;
+    return false;
 }
 
 static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
@@ -139,7 +159,7 @@ static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
     for (i = 0; i < sizeof dpt; ++i) md_x86_write8(c, 0x0050u, (uint16_t)(0x0100u + i), dpt[i]);
     md_x86_write16(c, 0x0040u, 0x0010u, 0x0021u); /* equipment */
     md_x86_write16(c, 0x0040u, 0x0013u, 640u);    /* conventional KiB */
-    md_x86_write8(c, 0x0040u, 0x0075u, 0u); /* hard disks advertised */
+    md_x86_write8(c, 0x0040u, 0x0075u, bb_sd_hdd_available()?1u:0u); /* BB_DOS622_HDD_V1: real BIOS 80h */
     c->cs = c->ds = c->es = c->ss = 0u;
     c->ip = 0x7C00u;
     c->r[MD_X86_SP] = 0x7C00u;

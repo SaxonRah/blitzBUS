@@ -1,0 +1,50 @@
+{
+  "tag": "BB_DOS622_TEXTIO_V1",
+  "files": {
+    "src/bb_live.c": {
+      "old": "102a98bdbfe91921e63e767c9922835ec48efef4667ae7ff5854f0582a6b7444",
+      "new": "02cf5e78d300eb09b893bbc00f624b2c74e4b1986e92756c4e6f23da2bbacc33",
+      "backup": "original_00.bin"
+    },
+    "src/bb_dos622_textio.inc": {
+      "old": null,
+      "new": "d3ae323b17f4ef50c008448ca29d5557e2fdaf54a6253393df3d51160df6aef8",
+      "backup": "original_01.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "old": "85439f46948bd4d3a5d01736b5f97ba621ef98786b3e7cb83f1ede03284d9140",
+      "new": "11434c7054a5b2aab292fba66a747a5cd32de1552a35348a084bfa2934fb38ee",
+      "backup": "original_02.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "old": "0b0b69d9616855fc94cce6aa7a59480476b04fda0c6c6cc02a0e26e5202e124f",
+      "new": "8eece65242d8187d964bb134efceb5a1edf3f58b77f13e87f3941c84a47953e0",
+      "backup": "original_03.bin"
+    },
+    ".bb_dos622_heap_rescue_v1_state/manifest.json": {
+      "old": "f9369e88d6bbf479d75e4e28c64d3d3c9596b14e137ba58e0864c8ef0065347c",
+      "new": "c80252c909d82f0694137e89fcd73a5ee7d0d76e3166052974632256f350a345",
+      "backup": "original_04.bin"
+    },
+    ".bb_dos622_stall_watch_v1_state/manifest.json": {
+      "old": "1b0f1075b73acc58e7b76eb37b62a1b4f8361b34d391cf49249644c4c7d10549",
+      "new": "e7a786ec0b5c4bd779ba1205a0b2db5651eb31f2c75f382e8f8c3e017f4f1dc9",
+      "backup": "original_05.bin"
+    },
+    ".bb_dos622_serial14_guard_v1_state/manifest.json": {
+      "old": "99513a00c9e76744d6281b6d5a11f278a64960bde1fcbe24e8b1a33408df248a",
+      "new": "90977d6605a8f9191a37f4fe491daa08b5db2b97be07f29681e17c600a01cab3",
+      "backup": "original_06.bin"
+    },
+    ".bb_dos622_printer17_v1_state/manifest.json": {
+      "old": "6f48c9109774949afdb4e47542db65ad0ee1f04f4212e8e4152e7ce0c20f5737",
+      "new": "3c4f454413afa32fcf1ca8e387163d74bf3a9d077e85d61994549e71c30e1b24",
+      "backup": "original_07.bin"
+    },
+    ".bb_dos622_rtc1a_v1_state/manifest.json": {
+      "old": "5e33f5d75f045ed61f02ed0a676c884a25cb3d7a1eb7d25d6c673018dc391775",
+      "new": "43c0153dc2636507a6e83b02fe72a6ca3d15190ad8a1f094008029d6aa64bb0b",
+      "backup": "original_08.bin"
+    }
+  }
+}

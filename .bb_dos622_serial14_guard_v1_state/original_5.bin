@@ -1,0 +1,35 @@
+{
+  "tag": "BB_DOS622_STALL_WATCH_V1",
+  "files": {
+    "src/bb_live.c": {
+      "old": "f15d6b47477fc73687cbe55eca6f6bd5862359061146be3c11d5bebc44525ee7",
+      "new": "102a98bdbfe91921e63e767c9922835ec48efef4667ae7ff5854f0582a6b7444",
+      "backup": "original_0.bin"
+    },
+    "src/bb_dos622_bios.inc": {
+      "old": "febbb219cc108668b28279eb7edae4a96b5e9dace5c1ef9a81c76068f8028757",
+      "new": "5b7ceeff013c6be5f67da03b0a026b6ad8c6b761c6916713752677b566d7f522",
+      "backup": "original_1.bin"
+    },
+    "src/bb_dos622_stall_watch.inc": {
+      "old": null,
+      "new": "bd77ac89fa58db3978d4278a7f2fcb10e250893dacb0ed8441022047a1736d95",
+      "backup": "original_2.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "old": "8646ef253a68810ae8c5fca34cc157088efeff5c6b08b34222d66d173fa36ea9",
+      "new": "2d98756afee30cd54914587fd6307b0c46e1d7286b120d0c80cfc88970b5fbf2",
+      "backup": "original_3.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "old": "80932e6328dfbe2e5629d1b8d99d02de4aa3704ea54e53d91c6e3c6329bdc10a",
+      "new": "4a840468cd31207fb46fadb0dec473faedd11d201b6ec99ef2442dd6a7add8c1",
+      "backup": "original_4.bin"
+    },
+    ".bb_dos622_heap_rescue_v1_state/manifest.json": {
+      "old": "5085d179841e5fe677c5686c89b21f4998cd8d4ead248fffcb22c4bdb7fd9bd2",
+      "new": "2417a5c6b23227283673121b6c3df5d15f0739f4edb98bfd7e0a61656112c9c1",
+      "backup": "original_5.bin"
+    }
+  }
+}

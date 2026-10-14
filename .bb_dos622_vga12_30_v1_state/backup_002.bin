@@ -1,0 +1,20 @@
+{
+  "tag": "BB_DOS622_HEAP_RESCUE_V1",
+  "files": {
+    "src/bb_live.c": {
+      "before": "2cbc5ce8451f14dff720303391e0991095a2f13abf4afd48a5d15b1c950fde03",
+      "after": "12c76d54018be0e173b34b97aec5424cb4c172d113bcec4b37ec945ab52f294f",
+      "backup": "backup_0.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "before": "dc10d4eb756b4e549771d80eb62722437c51043d2a19af7a7934bbbd46b229f8",
+      "after": "266ee9be94092ba5323b1bbd832d87410e21c6c916c1083b861b05ec676eebd5",
+      "backup": "backup_1.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "before": "425b5ef3a4bc26dec7581804bf0054547a98fe52465e1ee72fa6b616979929bb",
+      "after": "43c46f0a28cd07187a5e34a4b969ee91c77b1c43e9a8cd98aa5f229dcdbd176b",
+      "backup": "backup_2.bin"
+    }
+  }
+}
