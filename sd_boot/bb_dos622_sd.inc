@@ -5,6 +5,7 @@ static FIL bb622_swap_alt;
 static FIL *bb622_swap_active=&bb622_disk;
 static unsigned bb622_swap_a_number=1u;
 static bool bb622_swap_a_changed;
+static bool bb622_swap_a_ejected;
 static bool bb622_disk_open;
 static uint32_t bb622_read_calls;
 static uint32_t bb622_read_errors;
@@ -32,7 +33,7 @@ bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
 {
     FRESULT rc;
     UINT got = 0;
-    if (!bb622_disk_open || !dst || length != 512u || lba >= 2880u) return false;
+    if (!bb622_disk_open || bb622_swap_a_ejected || !dst || length != 512u || lba >= 2880u) return false;
     /* Must be done BEFORE the first FatFs operation after LCD clock init.
        Retiming an unrelated SPI interface (SPI0 LCD) would be incorrect. */
     bb622_retime_spi1();
@@ -87,7 +88,7 @@ bool bb_sd_dos622_select_a(unsigned n)
     uint8_t bs[512];
     char path[96];
     if(!bb622_disk_open || n<1u || n>9u)return false;
-    if(n==bb622_swap_a_number)return true;
+    if(n==bb622_swap_a_number && !bb622_swap_a_ejected)return true;
     if(n==1u) {
         if(snprintf(path,sizeof path,"0:/BLITZBUS/DOS622.IMG") >= (int)sizeof path)return false;
     } else if(snprintf(path,sizeof path,"0:/BLITZBUS/DOS622%u.IMG",n) >= (int)sizeof path)return false;
@@ -108,11 +109,56 @@ bool bb_sd_dos622_select_a(unsigned n)
     (void)f_close(bb622_swap_active);
     bb622_swap_active=candidate;
     bb622_swap_a_number=n;
+    bb622_swap_a_ejected=false;
     bb622_swap_a_changed=true;
     printf("[bb622-swap] A:%u OK read-only; BIOS media changed\n",n);
     fflush(stdout);
     return true;
 }
+
+/* BB_DOS622_BOOT_EJECT_V1: eject A without ending the DOS6 session.
+ * The running OS owns DOS6, but a floppy may temporarily have no media.
+ */
+bool bb_sd_dos622_a_image_ready(void) { return bb622_disk_open && !bb622_swap_a_ejected; }
+bool bb_sd_dos622_eject_a(void)
+{
+    if(!bb622_disk_open) return false;
+    if(!bb622_swap_a_ejected) {
+        bb622_retime_spi1();
+        (void)f_close(bb622_swap_active);
+        bb622_swap_a_ejected=true;
+    }
+    bb622_swap_a_changed=true;
+    printf("[bb622-swap] A:0 OK ejected; BIOS media changed\n");fflush(stdout);
+    return true;
+}
+
+/* BB_DOS622_BOOT_EJECT_V1: explicit cold-boot selector on the microSD.
+ * The legacy DOS2 path and default DOS6 A: boot are unchanged.
+ * C requires BOOT_DRIVE.TXT containing the single ASCII letter C.
+ */
+extern bool bb_sd_hdd_available(void);
+static char bb622_boot_drive='A';
+static void bb622_pick_boot(const char *drive)
+{
+    FIL f;FRESULT rc;UINT got=0;char choice='A';char path[96];
+    bb622_boot_drive='A';
+    if(!bb_sd_dos622_active())return;
+    if(snprintf(path,sizeof path,"%s/BLITZBUS/BOOT_DRIVE.TXT",drive)>=(int)sizeof path)return;
+    rc=f_open(&f,path,FA_READ);
+    if(rc==FR_OK){
+        rc=f_read(&f,&choice,1u,&got);
+        (void)f_close(&f);
+        if(rc==FR_OK && got==1u && (choice=='C'||choice=='c'))bb622_boot_drive='C';
+        else if(choice!='A' && choice!='a')printf("[bb622-boot] invalid BOOT_DRIVE.TXT, using A\n");
+    }
+    if(bb622_boot_drive=='C' && !bb_sd_hdd_available()) {
+        printf("[bb622-boot] C requested but HDD absent; fallback A\n");
+        bb622_boot_drive='A';
+    }
+    printf("[bb622-boot] cold boot selector=%c (A=setup, C=installed HDD)\n",bb622_boot_drive);
+}
+bool bb_sd_dos622_boot_c(void) {return bb622_boot_drive=='C';}
 
 /* DOS 6.x floppy boot candidates need the ordinary 1.44MB FAT12 layout.
    Presence of three system filenames does not certify a version/license.
@@ -128,7 +174,7 @@ static void bb622_mount(const char *drive)
     uint32_t root, nroot, lba;
     FRESULT rc;
     bb622_disk_open = false;
-    bb622_swap_active=&bb622_disk;bb622_swap_a_number=1u;bb622_swap_a_changed=false;
+    bb622_swap_active=&bb622_disk;bb622_swap_a_number=1u;bb622_swap_a_changed=false;bb622_swap_a_ejected=false;
     bb622_read_calls = bb622_read_errors = 0;
     if (snprintf(selname, sizeof selname, "%s/BLITZBUS/DOS622.TXT", drive) >= (int)sizeof selname) return;
     if (f_open(&select, selname, FA_READ) != FR_OK) return; /* opt-in only */

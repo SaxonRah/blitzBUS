@@ -1,94 +1,83 @@
-# blitzBUS DOS 6.22 — swap console controls V1 + V2.2 Windows self-test
+# blitzBUS DOS 6.22 — IRQ0 one-shot experiment V1
 
-This is a **host-only correction** for an *already installed* `BB_DOS622_SWAP_LCD_V2` layer. It doesn't modify `src`, `sd_boot`, the pre-existing PowerShell runners, older state/repair manifests, or SD media. Don't restore/reinstall your working DOS 6.22 firmware.
+This is a **bounded diagnostic experiment**, not a proven fix. In the same-run PIC test, Descent read IRR=01 (IRQ0 pending) and remained at `0FF2:87A2–87C2`; the scheduler advanced and **delivered=0**. Next we must distinguish a missing guest IRQ service from an emulator inability to observe IF-enabled instruction boundaries.
 
-## What happened
+**Prerequisites:** Existing `BB622_PIC_PENDING_V1` firmware source applied and verified, and `BB622_PIC_HOST_CONTROL_V1` host controls applied and verified. Existing host runner `scripts/bb_live_run_dos622_pic_control.ps1` must match its install manifest. Keep your working C: hard-disk image and all floppy images untouched. Back up `DOS622_HDD.IMG` before reattempting the Descent installer, since Descent writes to C:.
 
-1. `bb_dos622_swap_lcd_v2_1.py selftest` fails at the final historic-SD-clockfix metadata test **on Windows only**. The test builds a key such as `.bb_dos622_sd_clockfix_v1_state\\repair.json`, but V2.1 compares it to a forward-slash string. The new `bb_dos622_swap_lcd_v2_2.py` normalizes separators for that one *known* schema. This doesn't change installed files or historical SHA-256 values. V2.2 `selftest` and `verify` are appropriate; `probe`/`apply` are **not** because V2 is already installed.
-2. F9 can be intercepted by Windows consoles (and the original menu's feedback only appears in the title bar). The new **separate** runner accepts both F9 and Ctrl+G, and reads a disk-swap request file from `logs` so a second PowerShell window can direct A: or B: disk swaps even when the key never arrives.
+**Safety:** The firmware *does not* enable IRQ0 during DOS startup. The user explicitly arms Ctrl+U through a second-window command. It attempts **at most one legitimate guest IRQ0** using the existing PIC dispatcher, observing its normal IF/IMR/ISR/IVT eligibility checks; after that delivery it automatically switches OFF. If no delivery happens in 8 seconds, it automatically switches OFF and reports why. The experiment does **not** force interrupts while IF=0 and does not bypass the interrupt gate; it cannot guarantee the old interrupt-stability problem won't recur if the first interrupt actually executes. A reboot clears the trial state. This layer does not enable repeated timer interrupts or implement STI instruction-boundary handling.
 
-## Copy into `C:\blitzBUS`
+## 1. Extract, test, probe, apply
 
-- `bb622_swap_controls_fix_v1.py`
-- `bb_dos622_swap_lcd_v2_2.py`
-
-Keep the installed V2.1 script, `bb_dos622_atbios_v1.py`, `bb_dos622_color_host.ps1`, all previous runners, all manifests, and all SD card files. **Do not overwrite them.**
-
-## Verify old installed state
+Extract the *top-level* Python file plus its five imported dependency scripts into `C:\blitzBUS`. **Do not overwrite your existing dependencies if they differ:** the ZIP contains reference copies for standalone self-tests; use your already-installed originals. Run:
 
 ```powershell
 cd C:\blitzBUS
-python .\bb_dos622_swap_lcd_v2_2.py selftest
-python .\bb_dos622_swap_lcd_v2_2.py verify
-python .\bb_dos622_lineage_verify_v10.py verify
+python .\bb622_pic_pending_v1.py verify
+python .\bb622_pic_host_control_v1.py verify
+python .\bb622_irq0_trial_v1.py selftest
+python .\bb622_irq0_trial_v1.py probe
 ```
 
-The old script is replaced **only as a CLI entry point** with V2.2 when you want to verify/test. V2.2 uses the original `.bb_dos622_swap_lcd_v2_state` directory and does not create another install layer.
-
-## Generate the independent runner
+If `probe` passes and you have backed up your HDD image:
 
 ```powershell
-python .\bb622_swap_controls_fix_v1.py selftest
-python .\bb622_swap_controls_fix_v1.py probe
-python .\bb622_swap_controls_fix_v1.py apply
-python .\bb622_swap_controls_fix_v1.py verify
+python .\bb622_irq0_trial_v1.py apply
+python .\bb622_irq0_trial_v1.py verify
+python .\bb622_lineage_verify_v13.py verify
 ```
 
-That creates exactly two new files:
+The Python installer updates the checked source and installed current-SHA metadata as a *new*, independently reversible stage. Old original hashes and backup copies are not changed. The new host runner is cloned from the verified current PIC-control host runner; existing Ctrl+Y and Alt+G controls remain.
 
-- `scripts\bb_live_run_dos622_controls.ps1`
-- `scripts\bb622_request_disk.ps1`
+## 2. Rebuild and flash *once*
 
-It checks the original swap runner against the installed manifest before generating them. The source runner and installed checksum manifests do **not** change, and a separate exact-output checksum manifest is recorded in `.bb622_swap_controls_v1_state`.
-
-## Run the new unlimited console
+Use the same environment variables you already use, then:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File `
-  .\scripts\bb_live_run_dos622_controls.ps1 `
-  -MicroDOS C:\microDOS `
-  -Blitz86 C:\blitz86_v2 `
-  -Port COM5 -Seconds 0 -ConsoleView Screen
+    .\scripts\bb_live_run_dos622_irqtrial.ps1 `
+    -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 `
+    -Port COM5 -Seconds 0 -ConsoleView Screen
 ```
 
-`-Seconds 0` stays connected until Ctrl+X. This command retains the existing color/CP437 screen and logs everything in `logs\bb-live-*-console.txt`. It normally rebuilds/flashes as before. To **attach to an already running Pico without resetting it**, also pass `-NoBuild -NoFlash`, but note: the color console only receives *changes* to the guest screen, so it may show blank/partial rows until DOS updates the screen.
+For the initial run, **do not** specify `-NoBuild` or `-NoFlash`. If the board cannot enter BOOTSEL, use your established manual BOOTSEL method and verify the newly built image was flashed before testing. The installer should be left running; there is only one process allowed to own COM5.
 
-## Swap disks (two independent methods)
+## 3. Reproduce Descent's stall and arm exactly one guest IRQ0
 
-**Method 1 — in the main DOS console:** **Ctrl+G**, then **A**, then **2**. F9 continues to work if Windows delivers it. For Descent disk 3, use **Ctrl+G**, **B**, **3**. The number sends the command immediately. Wait for an `A:2 OK` / `B:3 OK` acknowledgement before pressing Enter inside the DOS installer.
-
-**Method 2 — in a *second* PowerShell window** (does not open COM5 and is not affected by function-key interception):
+Keep the DOS-console window open. From a separate PowerShell window run:
 
 ```powershell
 cd C:\blitzBUS
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bb622_request_disk.ps1 -Drive A -Disk 2
+powershell -NoProfile -ExecutionPolicy Bypass -File `
+    .\scripts\bb622_irq0_trial.ps1 -TimeoutSeconds 15
 ```
 
-For Descent disk 3:
+Expect an actual `PICO ACK: [bb622-irqtrial] ARMED` line. The requester reads only newly appended bytes from the same raw log and demands the host `SENT` marker before accepting the Pico acknowledgement. Once armed, the firmware will log one of:
+
+- `[bb622-irqtrial] DELIVERED one guest IRQ0; AUTO-OFF ...`
+- `[bb622-irqtrial] TIMEOUT no guest IRQ0 delivered; AUTO-OFF ... if0_delta=... masked_delta=...`
+
+If a crash or hardfault occurs while testing, leave the HDD intact and reboot into the known-good firmware. Do not repeatedly arm without inspecting the log first.
+
+After 10 seconds, obtain a permanent report in another window:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bb622_request_disk.ps1 -Drive B -Disk 3
+python .\bb622_irq0_report.py --root C:\blitzBUS
 ```
 
-The active DOS runner polls `logs\bb622-swap.request`, removes it, and forwards the same three-byte private request to the already-installed Pico firmware (`0x1C`, drive, number). Firmware confirms via `[bb622-swap] A:2 OK ...` or `FAIL ...` in the raw transcript. To monitor acknowledgements from the second window:
+**Send:** The trial command's acknowledgement, `bb622_irq0_report.py` output, and any `bb-v36-irq` or hardfault lines. That identifies whether the one interrupt was delivered, not deliverable because IF or PIC mask stayed disabled, or delivered into a broken ISR path.
+
+## 4. Roll back this new layer
+
+Stop the runner. While the source SHA still matches the installed state:
 
 ```powershell
-Get-Content (Get-ChildItem .\logs\bb-live-*-console.txt | Sort-Object LastWriteTime | Select-Object -Last 1).FullName -Wait -Tail 20
+python .\bb622_irq0_trial_v1.py verify
+python .\bb622_irq0_trial_v1.py restore
+python .\bb622_pic_pending_v1.py verify
 ```
 
-**Never press Enter on the DOS disk prompt before `OK`.** `DOS6222.IMG` / `DESCENT3.IMG` must exist under `BLITZBUS\` on the microSD (each exactly 1,474,560 bytes). The existing A image is read-only and a failed swap retains the old image.
+Then rebuild/flash the previous firmware if you want to return to its behavior. Never remove earlier stages to roll back this one.
 
-## Rollback
+## Validation scope
 
-```powershell
-python .\bb622_swap_controls_fix_v1.py verify
-python .\bb622_swap_controls_fix_v1.py restore
-```
-
-This removes **only** the two new host scripts and their independent state directory; it does not modify the already working V2 layer, your DOS images, or any previous checksum record.
-
-## Validation and limitations
-
-- Host-only installer LF and CRLF self-tests passed, including original-runner SHA precondition and byte-exact rollback.
-- V2.2 self-test passed on Linux with an explicit simulated Windows-backslash repair-path regression and LF/CRLF cascade tests. PowerShell cannot be executed in this Linux test runtime, so live Ctrl+G/F9 and file-swap commands still require a Windows + Pico session.
-- This intentionally does *not* reflash, replace firmware, edit LCD driver, alter the 80x25 color display, or make C: bootable. It fixes the actual host control and misleading regression-test problems.
+LF and CRLF source transformations, one-delivery gate, timeout diagnostics, host request string and byte-exact rollback have passed synthetic self-tests. **No real Pico compilation or Descent continuation has been executed in this environment.** The first real IRQ0 may still cause a guest fault. Avoid claiming success until the Pico tests report `DELIVERED` *and* Descent advances safely.

@@ -1,5 +1,20 @@
-LCD V2 selftest: PASS LF; PASS CRLF; PASS misplaced-HDD-marker refusal; PASS C11 B800 mirror.
-Lineage validator selftest: PASS ATBIOS->HDD; PASS ATBIOS->HDD->LCD; PASS corruption refusal.
-Integrated synthetic install/verify/audit/rollback: PASS.
-GitHub HEAD inspected: a0e2dbf756d3c9c3d8cfd6f43f08d2a6afd90298.
-Pico compile + physical LCD: NOT TESTED.
+Local tests — 2026-10-14
+
+bb622_boot_eject_v1.py selftest:
+  PASS LF/CRLF source anchor transformations
+  PASS isolated full probe/apply/verify/restore
+  PASS byte-exact rollback and refusal of overwritten generated host files
+  TEST ONLY — actual DOS622 repository Pico compilation pending
+
+bb622_lineage_verify_v11.py selftest:
+  PASS twelve-stage virtual rollback and original-backup corruption check
+
+bb622_console_report.py:
+  PASS parsed a historical MS-DOS 6.22 capture; wrote screen/events/watch text files
+
+bb622_hdd_audit.py:
+  PASS rejection of original blank FAT16 HDD image (MBR and partition valid,
+  DOS kernel files missing). New post-setup image not available in this container.
+
+Hardware validation still needed: C: IPL, ejected A/B behavior, real SD FatFs swap,
+Windows PowerShell request handling, and Descent's post-disk-1 stall.

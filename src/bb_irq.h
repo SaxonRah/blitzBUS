@@ -14,6 +14,14 @@ typedef struct BbIrq36 {
  uint8_t imr, irr, isr, base, init_step, icw1, expect_icw4, auto_eoi, read_isr, active;
 } BbIrq36;
 static BbIrq36 bb_irq36;
+/* BB622_PIC_PENDING_V1: development-only IRQ0 IRR experiment.
+ * Ctrl+Y turns pending-edge visibility on/off. Guest IRQ0 delivery remains
+ * disabled; no guest stack is touched by this experiment.
+ */
+static uint8_t bb622_pic_pending_probe_enabled;
+static uint32_t bb622_pic_pending_reads;
+static uint32_t bb622_pic_pending_reports;
+static uint8_t bb622_pic_pending_last=0xffu;
 /* v37: sampling profiler. Times include host/JIT scheduling and clock overhead.
  * EOI latency spans guest IRQ entry through the PIC acknowledgment and does
  * NOT represent exclusive CPU time inside the interrupt handler. */
@@ -50,7 +58,27 @@ static void bb_v37_record_eoi(void){
 
 static void bb_irq36_init(uint64_t now){memset(&bb_irq36,0,sizeof bb_irq36);bb_irq36.anchor_us=now;bb_irq36.base=8;bb_v37_inject_us=bb_v37_eoi_sum_us=bb_v37_eoi_max_us=bb_v37_eoi_samples=bb_v37_dispatch_samples=0;bb_v37_dispatch_sum_us=bb_v37_dispatch_max_us=bb_v37_dispatch_polls=bb_v37_pending_eoi=0;memset(bb_v37_eoi_hist,0,sizeof bb_v37_eoi_hist);bb_v37_poll_start=0;}
 static int bb_irq36_in(uint16_t port,uint8_t *val){
- if(port==0x20){*val=bb_irq36.read_isr?bb_irq36.isr:bb_irq36.irr;return 1;}
+ if(port==0x20){
+  *val=bb_irq36.read_isr?bb_irq36.isr:bb_irq36.irr;
+  if(bb622_pic_pending_probe_enabled){
+   ++bb622_pic_pending_reads;
+   /* Trace initial reads, state transitions and sparse progress; cap USB I/O. */
+   if(bb622_pic_pending_reports<48u &&
+      (bb622_pic_pending_reads<=16u || *val!=bb622_pic_pending_last ||
+       (bb622_pic_pending_reads&65535u)==0u)){
+    ++bb622_pic_pending_reports;
+    printf("[bb622-picprobe] IN20 #%lu val=%02X mode=%s irr=%02X imr=%02X isr=%02X scheduled=%llu delivered=%llu\n",
+       (unsigned long)bb622_pic_pending_reads,(unsigned)*val,
+       bb_irq36.read_isr?"ISR":"IRR",(unsigned)bb_irq36.irr,
+       (unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+       (unsigned long long)bb_irq36.scheduled,
+       (unsigned long long)bb_irq36.delivered);
+    fflush(stdout);
+   }
+   bb622_pic_pending_last=*val;
+  }
+  return 1;
+ }
  if(port==0x21){*val=bb_irq36.imr;return 1;}
  return 0;
 }

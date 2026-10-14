@@ -3,62 +3,62 @@
   "files": {
     "src/bb_live.c": {
       "before": "f1c6920ccbca995e390d44a94d1ae9c7e2039aa89d9dca5c3278c6482e187592",
-      "after": "19cfafe89e40e41f0cf9b550197407673e758460749fb3771bdbc67029a8c1d3",
+      "after": "0262b5ea5eece08a80d96ed42b77d6d7de37f7385ae8c72a26aa4cfef377b982",
       "backup": "original_00.bin"
     },
     ".bb_dos622_ipl_v1_state/manifest.json": {
       "before": "db6eae8152b976c7a73f8e50b5120cef5f3636a491045e2452720c64bca5649e",
-      "after": "af7cad88b6d442f05af27c6971a301a7012265d486e5378798e20cea3023db6c",
+      "after": "b7927ff8ff3b6fbdafbb27d1eb1f1f90a67ce561b6c74f827891c131c50e7724",
       "backup": "original_01.bin"
     },
     ".bb_dos622_boot_diag_v1_state/repair.json": {
       "before": "10560e9ea8e16a4298199fe9771a4271ba4e810365583e5b9c123b7ea598b7f2",
-      "after": "6a0d57f461fb484dc9e18573a2f74a49b731bb36e0ba775fabea1b2f90552856",
+      "after": "7f71f5f138054c62fc84f814d83fd6ab2bd513ca68a9d48a8953b97d86d5db2f",
       "backup": "original_02.bin"
     },
     ".bb_dos622_heap_rescue_v1_state/manifest.json": {
       "before": "6342cee240699ec680065599dd6211fdceb99a819b0f22d5623429eeb2070518",
-      "after": "3da937b9e7fd344c527c2a86a42721fb28fcfb37a89fc2378158ec17e871dc08",
+      "after": "fde9b00037a1a3b6f0ae87a12e4d5ad3e09f814b815918e65a5f35052cdec7b9",
       "backup": "original_03.bin"
     },
     ".bb_dos622_stall_watch_v1_state/manifest.json": {
       "before": "8afab9235024c4a69db0e927a39a0391162a6a2349e6f4800edd6fdcf9a08630",
-      "after": "aa8c95efcd18caab9b64b3812c87c38506b1aba4629a1c42a4637249f16ac350",
+      "after": "a9b781df63301071d4bc95c8d91595cbd2949959d5e3b8054a2b022a41105a65",
       "backup": "original_04.bin"
     },
     ".bb_dos622_serial14_guard_v1_state/manifest.json": {
       "before": "324b40f97fefc89f7a9d3094f6cae5abcbef43abacec914697ff100dd2d6c567",
-      "after": "c3bd78888a8b0e96389644afaf21076f012e309196f9accc0d40edc775affa2c",
+      "after": "f8c1e979ef0c4ec67f554845d619ad3ba01bb99781dbfbf8dfd505d24780a108",
       "backup": "original_05.bin"
     },
     ".bb_dos622_printer17_v1_state/manifest.json": {
       "before": "2d0fac582a3e5cac335f59275cc96b2eee2c8f6d2d5c4c476198f78d58345e33",
-      "after": "cb5d2e4897ead126aa7d96dc0954e41bad6ac5b148b9154efe9c01f48da7be1c",
+      "after": "336b7872ada8f3d64c2e2cb10eb37830cda2f3a2f68844d18be2dd0a97401d9b",
       "backup": "original_06.bin"
     },
     ".bb_dos622_rtc1a_v1_state/manifest.json": {
       "before": "0b094945e122b42eba891e2a83f8b88111417573d1f9923ffc6d7e579b24077c",
-      "after": "2b700585296fda5ef0af4987bfc8a5b0ce69c0271b5ad6e288699673c9f281a0",
+      "after": "60845a70a8d8887ea561c6a5610c110f7ebcb9f2fad2a71b084a53687a7174f0",
       "backup": "original_07.bin"
     },
     ".bb_dos622_textio_v1_state/manifest.json": {
       "before": "cbf1d661f265f4ae3202fa99a433806ac46c8ddfc8a60c70bc77f19da4856ed4",
-      "after": "cbf2009110b6e1c57c2d9239046e8d7cc9a40443578e99534e0439adb0493529",
+      "after": "25c84ba62124e06ca0e8133b4b7276c6d8783d3bdc4dbab19c9b02f0c7ecc4ab",
       "backup": "original_08.bin"
     },
     ".bb_dos622_textio_psram_v1_state/manifest.json": {
       "before": "f6798acc9f886753bc202b1176b22d7b302c84c20fd9355c02977e12de000cf6",
-      "after": "6d15076580785c92a7c64157be98fd45ec05fa1b8f5290a356f9e6046cf33a9b",
+      "after": "0d93fda93797b108640b90f46d9b958294442488d43d7f2eaeb5789a058de9ed",
       "backup": "original_09.bin"
     },
     ".bb_dos622_sram_floor_v1_state/manifest.json": {
       "before": "a5b730b1252d32b64db5022c3b3e6d43f5b4e988981ae73c8ecbb162e0ac00b3",
-      "after": "503e1244b0796a69bbea77f148ba96839f0934ea505dc7c7665d8a131aab2d49",
+      "after": "8f97e1243f0544fcae62fd60607b14de9a2e8cb31458ee3be55ff788e9314dcf",
       "backup": "original_10.bin"
     },
     ".bb_dos622_irq0_isolation_v1_state/manifest.json": {
       "before": "533404b3d3fe3cd74a3f4886ae56815be3aebb72f2389000b6fc7fbb8d1ad503",
-      "after": "3b0e37b55efacc12cae451667f3a5dc23fe1fc532a307390c2dbcf7e4bff6c5e",
+      "after": "2068aea272a4c897435d3fc40bad4962107e707a05f72b510f2fdf272d746ae6",
       "backup": "original_11.bin"
     }
   }

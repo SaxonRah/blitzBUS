@@ -1,0 +1,84 @@
+{
+  "tag": "BB_DOS622_KEYBA2_V3",
+  "source": "src/bb_live.c",
+  "files": [
+    {
+      "path": "src/bb_live.c",
+      "backup": "backup_000.bin",
+      "original": "99c40b35f00e5ba73589b23185d5aa8572eb4308e2e09341117d99063f999d4a",
+      "installed": "3726fa40b9bba73741e6ff4e6458e971fd647d7933853855a2fc86b6afb9f602"
+    },
+    {
+      "path": ".bb_dos622_boot_diag_v1_state/repair.json",
+      "backup": "backup_001.bin",
+      "original": "b7e6eb86544abda3f1a2616e2f22eac409f6269cf5e3bd9c2f5d3fb4cc70130a",
+      "installed": "a8e57df4439bd7e82f1ebe220e8d777b4141931d15dccd3d19aa2f7b015519c2"
+    },
+    {
+      "path": ".bb_dos622_heap_rescue_v1_state/manifest.json",
+      "backup": "backup_002.bin",
+      "original": "e8e1d984c4ab4e16de08e872f13a63a89a7bf0d1ea21f78052cca53521ed9ec3",
+      "installed": "ad0e4edca42744936a6a1a2a30125718ea7f5d098fe1f5a4f2090fac637a581e"
+    },
+    {
+      "path": ".bb_dos622_ipl_v1_state/manifest.json",
+      "backup": "backup_003.bin",
+      "original": "05fb0d514057ad0237d0d6adacc70e4d6616bfaedfec1ad3843293230abb8cc2",
+      "installed": "6dfaeab01433a9dd6783383731a489477931896bc5589c903acf52deb672686d"
+    },
+    {
+      "path": ".bb_dos622_irq0_isolation_v1_state/manifest.json",
+      "backup": "backup_004.bin",
+      "original": "ca1a11dd7e4a9def62ab76d191e8d45e8e9c36ee8504adfaff4de956d67cf6b1",
+      "installed": "1a9cd44196372bd82aead19db04fd825fa54e9e659f9a380bf7ebf819dff9375"
+    },
+    {
+      "path": ".bb_dos622_keyb92_v1_state/manifest.json",
+      "backup": "backup_005.bin",
+      "original": "f181499bf3bd6b2092e702a5a8676b8c4b26795e4fabdb4a8ef4d165e67bd7f4",
+      "installed": "be608c5169b75ee53ed14d6b733c0969fa5b2cb42e7d5b08128896b9e5d87b18"
+    },
+    {
+      "path": ".bb_dos622_printer17_v1_state/manifest.json",
+      "backup": "backup_006.bin",
+      "original": "5da85016e8b797a3b4090d68524c0742b4cd99496957e04d83fbff21dbcda2c9",
+      "installed": "40ff376c31069f44b57ed3f82ed092a3bf07b094f097e017c544b323d5fcdbd1"
+    },
+    {
+      "path": ".bb_dos622_rtc1a_v1_state/manifest.json",
+      "backup": "backup_007.bin",
+      "original": "6e9b44ec02921aa6e85a996c1f1bd8ec75f33fec8cf945ff65c6f170e00b63c5",
+      "installed": "bb63d84ea44b978828dc436248986676fc8de76d66585c73685ae47d770aaf6d"
+    },
+    {
+      "path": ".bb_dos622_serial14_guard_v1_state/manifest.json",
+      "backup": "backup_008.bin",
+      "original": "56edfd77b5c3bb3c3d1ab66971ef37693360b7cf7972d4c967ae962626b391ae",
+      "installed": "9cdd7b791d52e8290a07a5edf5769b2beea9d0139db0e0f2ea34519389fef37a"
+    },
+    {
+      "path": ".bb_dos622_sram_floor_v1_state/manifest.json",
+      "backup": "backup_009.bin",
+      "original": "741a8b05da2318ab96e763aa0d7598a6cdd54b628eb11761a1d810804ed1474f",
+      "installed": "83e7b5a2ed761f411a3c2f3afefb47ccbdfcfd3651ac795956523a7845ff4d4b"
+    },
+    {
+      "path": ".bb_dos622_stall_watch_v1_state/manifest.json",
+      "backup": "backup_010.bin",
+      "original": "99fa8eef0b6e572d1ffffcd24a8a0ca48687048ca4551f89a5226dec8b97e3a2",
+      "installed": "68825394c6e45356264c9fa909fd7d3bb151f49bf1732001f7d615be658d9d08"
+    },
+    {
+      "path": ".bb_dos622_textio_psram_v1_state/manifest.json",
+      "backup": "backup_011.bin",
+      "original": "f37dbf22c5843da1f931d2e3da5f7469cbf512973140a2125e850dab4110d6e3",
+      "installed": "a622a2e91fded81e615a5b9f2dd3f57381c084d794037f561ccf9a0ffcd12ad9"
+    },
+    {
+      "path": ".bb_dos622_textio_v1_state/manifest.json",
+      "backup": "backup_012.bin",
+      "original": "9a79a8eaa3b7dd5db60e116e049e784c974b7a601890e9e843e6535468887714",
+      "installed": "0daa12c867b0be613b8b200a046675910cac984a79faca3b9a9fe89d96ad51c0"
+    }
+  ]
+}

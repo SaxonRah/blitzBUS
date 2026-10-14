@@ -952,6 +952,8 @@ static void bb622_vt_feed(uint8_t *m,unsigned c,uint64_t now) {
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
 extern bool bb_sd_dos622_select_a(unsigned n);
 extern bool bb_sd_b_select(unsigned n);
+extern bool bb_sd_dos622_eject_a(void);
+extern bool bb_sd_dos622_eject_b(void); /* BB_DOS622_BOOT_EJECT_V1 */
 /* BB_DOS622_SWAP_LCD_V2: private CDC command prefix FS(1Ch), drive, digit.
  * Normal BIOS keyboard bytes remain unchanged; no UART/SD concurrency.
  * Host sends the whole command while DOS is paused at the floppy prompt.
@@ -959,6 +961,14 @@ extern bool bb_sd_b_select(unsigned n);
 static uint8_t bb622_swap_step;
 static uint8_t bb622_swap_drive;
 static uint64_t bb622_swap_started_us;
+/* BB622_IRQ0_TRIAL_V1: guarded runtime guest IRQ0 A/B experiment.
+ * OFF after boot. Delivers AT MOST ONE IRQ0 after explicit Ctrl+U arm.
+ */
+static uint8_t bb622_irq0_trial_armed;
+static uint64_t bb622_irq0_trial_started_us;
+static uint64_t bb622_irq0_trial_last_report_us;
+static uint64_t bb622_irq0_trial_if0_initial;
+static uint64_t bb622_irq0_trial_masked_initial;
 static void bb622_swap_receive(unsigned ch)
 {
     const uint64_t now=bb_now_us();
@@ -974,12 +984,13 @@ static void bb622_swap_receive(unsigned ch)
         return;
     }
     bb622_swap_step=0u;
-    if(ch<'1'||ch>'9')return;
+    if(ch<'0'||ch>'9')return;
     {
         unsigned number=ch-'0';
-        bool success=(bb622_swap_drive=='A') ? bb_sd_dos622_select_a(number) :
-                                              bb_sd_b_select(number);
-        if(bb622_swap_drive=='B') {
+        bool success=(bb622_swap_drive=='A') ?
+                     (number==0u?bb_sd_dos622_eject_a():bb_sd_dos622_select_a(number)) :
+                     (number==0u?bb_sd_dos622_eject_b():bb_sd_b_select(number));
+        if(bb622_swap_drive=='B' && number!=0u) {
             printf("[bb622-swap] B:%u %s; BIOS media %s\n",number,
                    success?"OK":"FAIL (previous disk retained)",success?"changed":"unchanged");
             fflush(stdout);
@@ -1007,7 +1018,36 @@ static void bb_v23_poll_input(void) {
             return;
         }
     }
-    /* v33: once video owns the console, this poll is the only reader of the
+    /* BB622_IRQ0_TRIAL_V1: Ctrl+U arms ONE IRQ0, never guest keyboard input. */
+    if(bb_sd_dos622_active() && c==0x15){
+        bb622_irq0_trial_armed=1u;
+        bb622_irq0_trial_started_us=bb_now_us();
+        bb622_irq0_trial_last_report_us=bb622_irq0_trial_started_us;
+        bb622_irq0_trial_if0_initial=bb_irq36.if_blocked;
+        bb622_irq0_trial_masked_initial=bb_irq36.masked;
+        printf("[bb622-irqtrial] ARMED one-shot guest IRQ0 (max=1 timeout=8s) irr=%02X imr=%02X isr=%02X if=%u\n",
+               (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+               (unsigned)((md_x86_flags(&R->cpu)&0x0200u)!=0));
+        fflush(stdout);
+        return;
+    }
+    /* BB622_PIC_PENDING_V1: Ctrl+Y is private host control, not guest key.
+     * This intentionally does not call bb_irq36_dispatch() or push FLAGS/CS/IP.
+     */
+    if(bb_sd_dos622_active() && c==0x19){
+        bb622_pic_pending_probe_enabled^=1u;
+        bb622_pic_pending_reads=0u;
+        bb622_pic_pending_reports=0u;
+        bb622_pic_pending_last=0xffu;
+        if(!bb622_pic_pending_probe_enabled){
+            bb_irq36.irr &= (uint8_t)~1u;
+        }
+        printf("[bb622-picprobe] Ctrl+Y %s pending-only (guest IRQ0 delivery still OFF) irr=%02X imr=%02X isr=%02X\n",
+               bb622_pic_pending_probe_enabled?"ON":"OFF",
+               (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr);
+        fflush(stdout);
+        return;
+    }    /* v33: once video owns the console, this poll is the only reader of the
        serial port, so Ctrl+] (0x1D) is handled here instead of reaching the
        guest keyboard queue. */
     if(c==0x1D){bb_v33_stats_now();return;}
@@ -1647,6 +1687,8 @@ static int start(MdRuntime *rt)
     bb_vga_init(rt->cpu.memory);
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
+    bb622_pic_pending_probe_enabled=0u; /* BB622_PIC_PENDING_V1: OFF on cold boot */
+    bb622_irq0_trial_armed=0u; /* BB622_IRQ0_TRIAL_V1: OFF on cold boot */
     printf("[bb622-diag] 02 before.b86_init\n"); fflush(stdout);
     b86_init(&C, rt->cpu.memory);
     printf("[bb622-diag] 03 after.b86_init\n"); fflush(stdout);
@@ -1924,7 +1966,43 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     /* BB_DOS622_IRQ0_ISOLATION_V1: A/B test native IRQ0 guest-stack delivery */
     if (rt == R) {
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && BB622_IRQ0_AB_DISABLE
-        if (!bb_sd_dos622_active()) bb_irq36_dispatch(rt, bb_now_us());
+        if (bb_sd_dos622_active()) {
+            if(bb622_irq0_trial_armed){
+                /* Run original PIC dispatcher only at the synchronized MD
+                   guest slice boundary; it checks IF, IMR, ISR and IVT. */
+                const uint64_t irq_now=bb_now_us();
+                const int was_delivered=bb_irq36_dispatch(rt,irq_now);
+                if(was_delivered){
+                    bb622_irq0_trial_armed=0u;
+                    printf("[bb622-irqtrial] DELIVERED one guest IRQ0; AUTO-OFF delivered=%llu irr=%02X imr=%02X isr=%02X cs:ip=%04X:%04X\n",
+                       (unsigned long long)bb_irq36.delivered,
+                       (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,
+                       (unsigned)bb_irq36.isr,
+                       (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip);
+                    fflush(stdout);
+                }else if(irq_now-bb622_irq0_trial_started_us>=8000000ull){
+                    bb622_irq0_trial_armed=0u;
+                    printf("[bb622-irqtrial] TIMEOUT no guest IRQ0 delivered; AUTO-OFF irr=%02X imr=%02X isr=%02X if0_delta=%llu masked_delta=%llu flags=%04X cs:ip=%04X:%04X\n",
+                       (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,
+                       (unsigned)bb_irq36.isr,
+                       (unsigned long long)(bb_irq36.if_blocked-bb622_irq0_trial_if0_initial),
+                       (unsigned long long)(bb_irq36.masked-bb622_irq0_trial_masked_initial),
+                       (unsigned)md_x86_flags(&rt->cpu),
+                       (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip);
+                    fflush(stdout);
+                }else if(irq_now-bb622_irq0_trial_last_report_us>=2000000ull){
+                    bb622_irq0_trial_last_report_us=irq_now;
+                    printf("[bb622-irqtrial] WAIT pending=%02X mask=%02X isr=%02X if0_delta=%llu masked_delta=%llu flags=%04X ip=%04X:%04X\n",
+                        (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,
+                        (unsigned)bb_irq36.isr,
+                        (unsigned long long)(bb_irq36.if_blocked-bb622_irq0_trial_if0_initial),
+                        (unsigned long long)(bb_irq36.masked-bb622_irq0_trial_masked_initial),
+                        (unsigned)md_x86_flags(&rt->cpu),
+                        (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip);
+                    fflush(stdout);
+                }
+            }else if(bb622_pic_pending_probe_enabled){bb_irq36_schedule(bb_now_us());}
+        } else bb_irq36_dispatch(rt, bb_now_us());
 #else
         bb_irq36_dispatch(rt, bb_now_us());
 #endif

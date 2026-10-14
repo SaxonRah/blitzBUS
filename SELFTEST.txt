@@ -1,0 +1,21 @@
+PROBE PASS: current V1 runner SHA verified; no source/SD/manifest changes
+Will generate: scripts/bb_live_run_dos622_controls_v3.ps1, scripts/bb622_request_disk_v3.ps1
+PROBE PASS: current V1 runner SHA verified; no source/SD/manifest changes
+Will generate: scripts/bb_live_run_dos622_controls_v3.ps1, scripts/bb622_request_disk_v3.ps1
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+APPLIED: independent confirmed-swap host scripts only; firmware/images untouched
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+RESTORED V3 host scripts; firmware, images and V1 untouched
+SELFTEST PASS LF SHA, ACK parser, exact rollback
+PROBE PASS: current V1 runner SHA verified; no source/SD/manifest changes
+Will generate: scripts/bb_live_run_dos622_controls_v3.ps1, scripts/bb622_request_disk_v3.ps1
+PROBE PASS: current V1 runner SHA verified; no source/SD/manifest changes
+Will generate: scripts/bb_live_run_dos622_controls_v3.ps1, scripts/bb622_request_disk_v3.ps1
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+APPLIED: independent confirmed-swap host scripts only; firmware/images untouched
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+VERIFY PASS: host ACK runner+requester checksums, V1 source intact
+RESTORED V3 host scripts; firmware, images and V1 untouched
+SELFTEST PASS CRLF SHA, ACK parser, exact rollback
+SELFTEST PASS; PowerShell/Pico integration not available in Linux container

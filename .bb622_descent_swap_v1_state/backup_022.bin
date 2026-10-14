@@ -1,0 +1,55 @@
+{
+  "tag": "BB_DOS622_SRAM_FLOOR_V1",
+  "files": {
+    "src/bb_live.c": {
+      "before": "fce167f2512b8b93cbe0299f3bb3c2fe2e0a0405891c3807f79e1166fe0a6d7c",
+      "after": "975172f50f463790c2dad82850955ea6bbda92c01cdfaa829db85c5c5685d9c1",
+      "backup": "original_00.bin"
+    },
+    ".bb_dos622_ipl_v1_state/manifest.json": {
+      "before": "7e4a54d68aaffa9d5ebc37ada752deb609175876e0f98189ee138e1240fa4761",
+      "after": "29700b8068f6e8f7077f3ffbd9e52a324df2f582a82989ee625ae4a0c029f3c1",
+      "backup": "original_01.bin"
+    },
+    ".bb_dos622_boot_diag_v1_state/repair.json": {
+      "before": "10e281b943110655b151119edf58f617bbf25866df81557daa6ba0b9b6012d1c",
+      "after": "b76003ef588f33d184975c8cf698be2181210eb0a091cc2862aaf319b79f6ab2",
+      "backup": "original_02.bin"
+    },
+    ".bb_dos622_heap_rescue_v1_state/manifest.json": {
+      "before": "8dc2287087b4c243844e50401ba2e53ada0cea7407d7ebd0113a3b3c0c2c5307",
+      "after": "333894ef268bb629a8605d5e389f9a227fb708369b3df4fdc85f4dcde1104c39",
+      "backup": "original_03.bin"
+    },
+    ".bb_dos622_stall_watch_v1_state/manifest.json": {
+      "before": "2f35c80909bdc8f971dd8eb93e163614e83d06efd38ce699d948c100dd6d93f7",
+      "after": "461f934e985e0ac036a6a974d3242dbc0cbf30572f46e17f762356b981572110",
+      "backup": "original_04.bin"
+    },
+    ".bb_dos622_serial14_guard_v1_state/manifest.json": {
+      "before": "93cb2fabe0f4607a3f8121181fd7fdcb3e785c15827e238c00b715ae67e6796b",
+      "after": "1ad7950735d32cf15053649e65967a6933308c9bd3a66d651c00f274490e19eb",
+      "backup": "original_05.bin"
+    },
+    ".bb_dos622_printer17_v1_state/manifest.json": {
+      "before": "ee0bb2cdb8261aed9ad6f5a8a4f05a5d376af022b4e95178aee3819b7cbb0494",
+      "after": "0566639372712b0d1a5237c1c871472d63170f4ffce308dd6c87a6febb4435d4",
+      "backup": "original_06.bin"
+    },
+    ".bb_dos622_rtc1a_v1_state/manifest.json": {
+      "before": "6fa3a3d37a5a2720c47823da5a93532ba62f11ca17993c2adc7f6a749999dcc0",
+      "after": "ffe63c05e6dd1daaae8d19f32b21d6168b43a164879d9560b69517fcfca2974f",
+      "backup": "original_07.bin"
+    },
+    ".bb_dos622_textio_v1_state/manifest.json": {
+      "before": "0458bc77ed36367838a14a10c081d9d9ee422bd1c68956034fb1a2b971757dc6",
+      "after": "16e5305e384b81e92585fe458db0e7a6f269e87db9d4d22c4afbe07b9b1bd013",
+      "backup": "original_08.bin"
+    },
+    ".bb_dos622_textio_psram_v1_state/manifest.json": {
+      "before": "6185b746aab74c9562fe3b1cf785ccb7b04c1371abc0caff69f966cb7a93a227",
+      "after": "b8229493981ebc3e9c6b86c1a1364e50e484cbe6dbd26631b00da7d8eb939682",
+      "backup": "original_09.bin"
+    }
+  }
+}

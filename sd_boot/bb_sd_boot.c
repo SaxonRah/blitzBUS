@@ -16,6 +16,11 @@
 #define BB_SD_BYTES 368640u
 #define BB_SD_SECTOR 512u
 static FIL bb_b_img;
+/* BB622_DESCENT_SWAP_V1: two slots, commit new file only after validation. */
+static FIL bb_b_swap_alt;
+static FIL *bb_b_current=&bb_b_img;
+static unsigned long bb_b_media_generation;
+static unsigned long bb_b_reported_read_generation;
 static bool bb_b_open;
 static bool bb622_swap_b_changed;
 static unsigned bb_b_number;
@@ -47,6 +52,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     unsigned offset;
 
     bb_b_open = false;
+    bb_b_current=&bb_b_img;bb_b_media_generation=0u;bb_b_reported_read_generation=0u;
     bb622_swap_b_changed=false;
     bb_b_number = 0u;
     bb_c_open = false;
@@ -66,6 +72,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     sd->state.mounted = true;
     bb622_mount(drive); /* BB_DOS622_IPL_V1 opt-in only */
     bb622_hd_mount(drive); /* BB_DOS622_HDD_V1 */
+    bb622_pick_boot(drive); /* BB_DOS622_BOOT_EJECT_V1 */
     if (snprintf(path, sizeof(path), "%s/BLITZBUS/BOOT.IMG", drive) >= (int)sizeof(path)) return false;
     err = f_open(&bb_img, path, FA_READ | FA_WRITE);
     if (err != FR_OK) {
@@ -377,15 +384,22 @@ bool bb_sd_b_read_sector(uint32_t sector, uint8_t *data, size_t size)
     FRESULT fr;
     UINT got=0u;
     static unsigned long reads;
-    if (bb_generic_b_open) return bb_sd_b_read_generic(sector,data,size);
+    if (bb_generic_b_open && !bb_sd_dos622_active()) return bb_sd_b_read_generic(sector,data,size);
     if (!bb_b_open || !data || size != 512u || sector >= 2880u) return false;
     (void)spi_set_baudrate(spi1, 12500000u);
-    fr = f_lseek(&bb_b_img, (FSIZE_t)sector * 512u);
-    if (fr == FR_OK) fr=f_read(&bb_b_img, data, 512u, &got);
+    fr = f_lseek(bb_b_current, (FSIZE_t)sector * 512u);
+    if (fr == FR_OK) fr=f_read(bb_b_current, data, 512u, &got);
     if (fr != FR_OK || got != 512u) {
         printf("[bb-sd-b] READ ERROR disk=%u lba=%lu fr=%d got=%u\n",
                bb_b_number, (unsigned long)sector, (int)fr, (unsigned)got);
         return false;
+    }
+    if(bb_sd_dos622_active() && bb_b_media_generation &&
+       bb_b_media_generation!=bb_b_reported_read_generation){
+        bb_b_reported_read_generation=bb_b_media_generation;
+        printf("[bb622-bmedia] B first new-image read disk=%u lba=%lu generation=%lu\n",
+               bb_b_number,(unsigned long)sector,bb_b_media_generation);
+        fflush(stdout);
     }
     if (++reads <= 6u)
         printf("[bb-sd-b] read disk=%u lba=%lu OK\n",bb_b_number,(unsigned long)sector);
@@ -400,41 +414,68 @@ bool bb_sd_dos622_take_b_change(void)
     return changed;
 }
 
-/* BB_DESCENT_LIVESWAP_V1. Called only by the emulator's INT F6 service. */
-bool bb_sd_b_select(unsigned selected)
+/* BB_DOS622_BOOT_EJECT_V1: eject physical B but keep the drive present. */
+bool bb_sd_dos622_eject_b(void)
 {
-    char path[96];
-    FRESULT fr;
-    unsigned previous=bb_b_number;
-    if (selected < 1u || selected > 5u || !bb_img_open) return false;
-    if (selected == bb_b_number && bb_b_open) return true;
-    if (bb_b_open) {
-        (void)f_close(&bb_b_img);
+    if(!bb_sd_dos622_active())return false;
+    if(bb_b_open){
+        (void)spi_set_baudrate(spi1,12500000u);
+        (void)f_close(bb_b_current);
         bb_b_open=false;
     }
-    if (snprintf(path, sizeof(path), "%s/BLITZBUS/DESCENT%u.IMG", "0:", selected) >= (int)sizeof(path))
-        return false;
-    (void)spi_set_baudrate(spi1, 12500000u);
-    fr=f_open(&bb_b_img,path,FA_READ);
-    if (fr==FR_OK && f_size(&bb_b_img)==(FSIZE_t)1474560u) {
-        bb_b_open=true;
-        bb_b_number=selected;
-        if(bb_sd_dos622_active())bb622_swap_b_changed=true; /* BB_DOS622_SWAP_LCD_V2 */
-        printf("[bb-sd-b] LIVE SWITCH B: disk=%u OK\n",selected);
-        return true;
-    }
-    if (fr==FR_OK) (void)f_close(&bb_b_img);
-    printf("[bb-sd-b] LIVE SWITCH FAILED selected=%u fr=%d\n",selected,(int)fr);
-    if (previous >= 1u && previous <= 5u) {
-        if (snprintf(path,sizeof(path),"%s/BLITZBUS/DESCENT%u.IMG","0:",previous)<(int)sizeof(path) &&
-            f_open(&bb_b_img,path,FA_READ)==FR_OK) {
-            bb_b_open=true;
-            bb_b_number=previous;
-        }
-    }
-    return false;
+    bb_b_number=0u;
+    bb622_swap_b_changed=true;
+    printf("[bb622-swap] B:0 OK ejected; BIOS media changed\n");fflush(stdout);
+    return true;
 }
 
+/* BB_DESCENT_LIVESWAP_V1. Called only by the emulator's INT F6 service. */
+/* BB622_DESCENT_SWAP_V1: transactional read-only B: media exchange.
+ * Keep the previous image valid until a replacement is opened and checked.
+ * The two FIL slots alternate to avoid FatFs replacing an open object.
+ * No guest files or the mounted HDD image are modified here.
+ */
+bool bb_sd_b_select(unsigned selected)
+{
+    FIL *candidate;
+    FRESULT fr;
+    UINT got=0u;
+    uint8_t boot[512];
+    char path[96];
+    if(selected<1u || selected>5u || !bb_img_open)return false;
+    if(selected==bb_b_number && bb_b_open)return true;
+    if(snprintf(path,sizeof path,"0:/BLITZBUS/DESCENT%u.IMG",selected)>=(int)sizeof path)return false;
+    (void)spi_set_baudrate(spi1,12500000u);
+    candidate=(bb_b_current==&bb_b_img)?&bb_b_swap_alt:&bb_b_img;
+    fr=f_open(candidate,path,FA_READ);
+    if(fr!=FR_OK){
+        printf("[bb-sd-b] LIVE SWITCH B: disk=%u FAIL open fr=%d (previous retained)\n",selected,(int)fr);
+        fflush(stdout);
+        return false;
+    }
+    if(f_size(candidate)!=1474560u ||
+       f_read(candidate,boot,512u,&got)!=FR_OK || got!=512u ||
+       boot[510]!=0x55u || boot[511]!=0xAAu ||
+       (boot[0]!=0xEBu && boot[0]!=0xE9u) ||
+       boot[11]!=0u || boot[12]!=2u || boot[13]!=1u ||
+       boot[16]!=2u || boot[19]!=0x40u || boot[20]!=0x0Bu){
+        (void)f_close(candidate);
+        printf("[bb-sd-b] LIVE SWITCH B: disk=%u FAIL invalid 1.44MB FAT12 (previous retained)\n",selected);
+        fflush(stdout);
+        return false;
+    }
+    /* Commit only after validation; sector reads always use bb_b_current. */
+    if(bb_b_open)(void)f_close(bb_b_current);
+    bb_b_current=candidate;
+    bb_b_open=true;
+    bb_b_number=selected;
+    if(bb_sd_dos622_active())bb622_swap_b_changed=true;
+    ++bb_b_media_generation;
+    printf("[bb-sd-b] LIVE SWITCH B: disk=%u OK generation=%lu\n",
+           selected,(unsigned long)bb_b_media_generation);
+    fflush(stdout);
+    return true;
+}
 /* BB_GENERIC_DISK_V1: read-only B: backed by SD FAT or nested FAT16 C: file. */
 static FIL bb_generic_b_file;
 static bool bb_generic_b_open = false;

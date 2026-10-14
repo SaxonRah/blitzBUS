@@ -1,0 +1,29 @@
+{
+  "tag": "BB_DOS622_HDD_V2",
+  "files": [
+    {
+      "path": "src/bb_dos622_hdd_bios_v1.inc",
+      "backup": "backup_000.bin",
+      "original": "9fb088b70358da24cce380aa582cccd2bf97287107d0482953de4f3c7df04758",
+      "installed": "23091d60bf53fdfb54700fb84fb60cfbbb8f3f039927325a22b3e8940c65bdd6"
+    },
+    {
+      "path": ".bb_dos622_hdd_v1_state/manifest.json",
+      "backup": "backup_001.bin",
+      "original": "3bcb4c3b1470f942fb8b1498a6fbdd697ccb25bdf4ac126ae26f8157d2022998",
+      "installed": "1972f2357ed0b8a2d6c8bfa8438fa90b06228ebb031f060bf4ce238c2a7c1a01"
+    },
+    {
+      "path": ".bb_dos622_lcd_text_v2_state/manifest.json",
+      "backup": "backup_002.bin",
+      "original": "855dab345cb0a44860e4c032adc84f3c164b3968354691c36945222211b702f4",
+      "installed": "c500baacbc034cf03d6f6ec665a460c6f831f12dd0040e1461e3fe04ff504f4e"
+    },
+    {
+      "path": ".bb_dos622_screen_clear_v1_state/manifest.json",
+      "backup": "backup_003.bin",
+      "original": "6471afc40ab9fb55662dbd8fcb5f037fa6d1a6aac1ab6018cae43bb82ede1e26",
+      "installed": "e9756cae79c5276aad42c4327497fda0b5a424def757d9b3c31455695ee03d2a"
+    }
+  ]
+}
