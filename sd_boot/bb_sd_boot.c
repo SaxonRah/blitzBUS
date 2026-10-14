@@ -31,6 +31,9 @@ static bool bb_img_open;
 static unsigned long bb_write_count;
 static unsigned long bb_write_errors;
 
+/* BB_DOS622_IPL_V1 - external optional SD boot floppy */
+#include "bb_dos622_sd.inc"
+
 bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
 {
     sd_card_t *sd;
@@ -57,6 +60,7 @@ bool bb_sd_boot_image(uint8_t *dest, unsigned bytes)
     err = f_mount(&sd->state.fatfs, drive, 1u);
     if (err != FR_OK) { printf("[bb-sd] mount=%d fallback\n", (int)err); return false; }
     sd->state.mounted = true;
+    bb622_mount(drive); /* BB_DOS622_IPL_V1 opt-in only */
     if (snprintf(path, sizeof(path), "%s/BLITZBUS/BOOT.IMG", drive) >= (int)sizeof(path)) return false;
     err = f_open(&bb_img, path, FA_READ | FA_WRITE);
     if (err != FR_OK) {

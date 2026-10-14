@@ -1310,8 +1310,13 @@ static bool bb_v15_interrupt(MdRuntime *rt, uint8_t vector, void *user)
     return bb_v15_original_interrupt ? bb_v15_original_interrupt(rt,vector,user) : false;
 }
 
+/* BB_DOS622_IPL_V1 - initial BIOS implementation lives in flash */
+#include "bb_dos622_bios.inc"
+
 static int start(MdRuntime *rt)
 {
+    /* BB_DOS622_BOOT_DIAG_V1 */
+    printf("[bb622-diag] 01 start.enter\n"); fflush(stdout);
     R = rt;
     if (rt->hooks.interrupt != md_msdos2_boot_interrupt || rt->hooks.user == NULL) { failed = 1; fail_reason = "not-msdos2-boot"; return 0; }
     if (((uintptr_t)rt->cpu.memory & 63u) != 0) { failed = 1; fail_reason = "guest-not-64-aligned"; return 0; }
@@ -1320,14 +1325,19 @@ static int start(MdRuntime *rt)
     bb_vga_init(rt->cpu.memory);
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
+    printf("[bb622-diag] 02 before.b86_init\n"); fflush(stdout);
     b86_init(&C, rt->cpu.memory);
+    printf("[bb622-diag] 03 after.b86_init\n"); fflush(stdout);
 #if BB386_PICO_PROBE && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     /* Private PSRAM CPU; guest HMA bytes saved/restored; never changes C. */
+    printf("[bb622-diag] 04 before.386_probe\n"); fflush(stdout);
     (void)bb386_test_run(rt->cpu.memory);
+    printf("[bb622-diag] 05 after.386_probe\n"); fflush(stdout);
 #endif      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
 #ifndef BB_CPU_MODEL
 #define BB_CPU_MODEL 0u
 #endif
+    printf("[bb622-diag] 06 before.cpu_model\n"); fflush(stdout);
     C.model = BB_CPU_MODEL;            /* v63: 0 = 8086 (exact), 1 = 80186 instruction set */
     printf("[bb-v63-cpu] blitz86 CPU model %s\n", C.model >= 2 ? "80286 (real mode)" : C.model ? "80186" : "8086");
     C.int_hook = hook_int;
@@ -1338,7 +1348,9 @@ static int start(MdRuntime *rt)
     bb_code = mmap(NULL, BB_CODE_BYTES, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (bb_code == MAP_FAILED) { failed = 1; fail_reason = "mmap"; return 0; }
 #endif
+    printf("[bb622-diag] 07 before.jit_create\n"); fflush(stdout);
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
+    printf("[bb622-diag] 08 after.jit_create\n"); fflush(stdout);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     printf("[bb-r52] code-cache %u KiB, %s, meta-used=%u of %u KiB\n", (unsigned)(BB_CODE_BYTES/1024u),
@@ -1355,8 +1367,19 @@ static int start(MdRuntime *rt)
     bb_shadow = aligned_alloc(64, (B86_MEM_BYTES + 63u) & ~63u);
 #endif
     if (bb_shadow) b86_jit_set_shadow(J, bb_shadow);
+    printf("[bb622-diag] 09 before.bios_hook\n"); fflush(stdout);
     bb_v15_original_interrupt = rt->hooks.interrupt;
     rt->hooks.interrupt = bb_v15_interrupt;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    /* BB_DOS622_IPL_V1: boot a real disk only when DOS622.TXT = 1. */
+    if (bb_sd_dos622_active()) {
+        bb_v15_original_interrupt = bb622_bios_interrupt;
+        printf("[bb622-diag] 10 before.dos622_boot\n"); fflush(stdout);
+        if (!bb622_boot_floppy(rt)) {
+            failed = 1; fail_reason = "DOS622 sector read failed"; return 0;
+        }
+    }
+#endif
     bb_v35_original_in8=rt->hooks.in8;
     bb_v35_original_out8=rt->hooks.out8;
     rt->hooks.in8=bb_v35_pit_in8;
