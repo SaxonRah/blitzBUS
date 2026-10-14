@@ -1,0 +1,96 @@
+{
+  "tag": "BB_DOS622_VGA12_34_V1",
+  "source": "src/bb_live.c",
+  "files": [
+    {
+      "path": "src/bb_live.c",
+      "backup": "backup_000.bin",
+      "original": "2b37d15bf75e0af512d7ba716c73512df37039ca4ce897bcbeeacaf94a972cf6",
+      "installed": "f2f5d7d53a614fd865d24139a81a477d5f258b221de2871590461b5bd4707f87"
+    },
+    {
+      "path": ".bb_dos622_boot_diag_v1_state/repair.json",
+      "backup": "backup_001.bin",
+      "original": "587be9cba3368d1298f04bdf74c43fe67556afcf0f3f7ea152108364ac9badab",
+      "installed": "a21b0837e1ceb2bbc109970338d7d1e1352e8537474d5a0d4176c3593079ccbb"
+    },
+    {
+      "path": ".bb_dos622_heap_rescue_v1_state/manifest.json",
+      "backup": "backup_002.bin",
+      "original": "3025305e32a85f8fa13045f7d3e657dfea3766d05d238eed78f90145b7180592",
+      "installed": "a0ce88816f74baefe0b571336c253a54ba656885988ada160f90e56b96771b2e"
+    },
+    {
+      "path": ".bb_dos622_ipl_v1_state/manifest.json",
+      "backup": "backup_003.bin",
+      "original": "02a7d45c4ece81051c1c667d39c107d257b7143a22ec7562d1401e92532dbffe",
+      "installed": "251e4b2724045b93781a4c7502c7f68f0fb6e43568a66744c248fd4020263125"
+    },
+    {
+      "path": ".bb_dos622_irq0_isolation_v1_state/manifest.json",
+      "backup": "backup_004.bin",
+      "original": "f508440f4d223b68bed82c83ead3beb591d9dc60d07db03cdaff6efb9f9a2b36",
+      "installed": "09508ca99afe91a74926bd1159122e660e97119890af1a2e64af42594d3159df"
+    },
+    {
+      "path": ".bb_dos622_keyb92_v1_state/manifest.json",
+      "backup": "backup_005.bin",
+      "original": "90a7a163e11fc0028e6580cb44f2e3dcf19b7cf6d72b5a66854f2bf534169558",
+      "installed": "0b952636411fb1fb54f2d4a0cfb3b247449a71160f2feb3c886546e53cd19ddd"
+    },
+    {
+      "path": ".bb_dos622_keyba2_v3_state/manifest.json",
+      "backup": "backup_006.bin",
+      "original": "9793649cf0db0889e40b88120171f19e768417afae8bb7cc708ac580d98f2835",
+      "installed": "6dbc09c005f386ab50d7f848237b78abb9e0e65e1ae9ae4d38e2b1c4727c1c23"
+    },
+    {
+      "path": ".bb_dos622_p61_refresh_v1_state/manifest.json",
+      "backup": "backup_007.bin",
+      "original": "b5e8e17bed1d3c636b0de0cf29c45867e8a35255b470766c8884c53c5c29103e",
+      "installed": "4e0a973cf794c6487848cac43a3ce2bebb9b15966e24457b647937ebaa5a71c9"
+    },
+    {
+      "path": ".bb_dos622_printer17_v1_state/manifest.json",
+      "backup": "backup_008.bin",
+      "original": "1d188eef06c19927f0cc638793e83e65f8582aa26878b9a787907e344bb3b392",
+      "installed": "0e4df90a2a369e5ab194176d02bd5229756a740e3504ef5876957c03c2a1097b"
+    },
+    {
+      "path": ".bb_dos622_rtc1a_v1_state/manifest.json",
+      "backup": "backup_009.bin",
+      "original": "061f34d9c1495c8452b6d410fb08312d7f62ee91cbc9fd540dd7389d0e86e4ce",
+      "installed": "e53347aaab27f2d747965845216bf7bc3fcb8e587b10b93b3cac4d3c179032d6"
+    },
+    {
+      "path": ".bb_dos622_serial14_guard_v1_state/manifest.json",
+      "backup": "backup_010.bin",
+      "original": "d4ba658521b6e5cf397a506b53abf766c9b90cd52d4c9c7283a655ee73f972fc",
+      "installed": "ce4925babe8db518809d9f8f77e5bf40b975ae19cc0bc4bcfee75bc5af5eb02c"
+    },
+    {
+      "path": ".bb_dos622_sram_floor_v1_state/manifest.json",
+      "backup": "backup_011.bin",
+      "original": "219975465f82880978bfe1e84ef89f9e3594367b7a551bcc5875020ebad9ac28",
+      "installed": "907dc2f1df1c8c12a4e45e6461666d7a6dd705e87708e0ab719fa4f93cdf94e3"
+    },
+    {
+      "path": ".bb_dos622_stall_watch_v1_state/manifest.json",
+      "backup": "backup_012.bin",
+      "original": "f04e3f68ee87ae6994bb531002204522278402c0041ea58c3a5447964bd11416",
+      "installed": "749918940bb928d5f22ff710855e94517d37d14502b36a09bd2390631e15b318"
+    },
+    {
+      "path": ".bb_dos622_textio_psram_v1_state/manifest.json",
+      "backup": "backup_013.bin",
+      "original": "a715be614f21a9f60d2a0578d4ad848a01a2ceabdf7c1988c7c1841730b04c2a",
+      "installed": "f241444846ab052ebe5cf2ea43c5ccbf0d5db2173ffdadc2f9b7a0be2f2b029a"
+    },
+    {
+      "path": ".bb_dos622_textio_v1_state/manifest.json",
+      "backup": "backup_014.bin",
+      "original": "a3784556237422a2af98782f25fdb9650e0ec92074ac7c55cdf7c9a276ba26d8",
+      "installed": "afbc95c3a42a5c9c587df2d01e4b1981e04cd2eacfe978288b498386a2c4bbdd"
+    }
+  ]
+}

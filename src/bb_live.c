@@ -833,6 +833,122 @@ static void bb_v39_psram_calibrate(void)
 static void bb_v33_stats_now(void);
 /* BB_DOS622_TEXTIO_V1 - input + text output only for real DOS 6.22 */
 #include "bb_dos622_textio.inc"
+/* BB_DOS622_VGA0B_KEYS_V1: translate CDC terminal keys to BIOS INT16 scan codes.
+ * ESC O P/R (F1/F3), CSI cursor keys and numeric tilde codes are consumed
+ * as one PC BIOS key.  Never enqueue the ESC, '[', digits and '~' separately.
+ * Standalone Escape is delivered after a short timeout.
+ * No changes to DOS2 or to the guest CPU/JIT.
+ */
+static uint8_t bb622_vt_state;      /* 0 idle, 1 ESC, 2 CSI, 3 SS3 */
+static uint16_t bb622_vt_number;
+static uint64_t bb622_vt_last_us;
+static uint16_t bb622_vt_logged;
+static void bb622_vt_reset(void) {
+    bb622_vt_state=0u; bb622_vt_number=0u; bb622_vt_last_us=0u;
+    bb622_vt_logged=0u;
+}
+static void bb622_vt_scancode(uint8_t *m,uint8_t scan) {
+    uint16_t h,t,next;
+    if(!scan)return;
+    bb_v22_queue_init(m);
+    h=bb_v22_word(m,0x41au); t=bb_v22_word(m,0x41cu);
+    next=(uint16_t)(t+2u); if(next>=0x3eu)next=0x1eu;
+    if(next==h){++bb_v23_key_drop;return;}
+    bb_v22_write_word(m,0x400u+t,(uint16_t)((uint16_t)scan<<8));
+    bb_v22_write_word(m,0x41cu,next);
+    ++bb_v23_keys;
+    if(bb622_vt_logged++<32u) {
+        printf("[bb622-vtkey] scan=%02X AX=%04X queued=%lu\n",
+            (unsigned)scan,(unsigned)(scan<<8),(unsigned long)bb_v23_keys);
+        fflush(stdout);
+    }
+}
+static uint8_t bb622_vt_cursor(unsigned c) {
+    switch(c) {
+    case 'A':return 0x48u; /* Up */
+    case 'B':return 0x50u; /* Down */
+    case 'C':return 0x4Du; /* Right */
+    case 'D':return 0x4Bu; /* Left */
+    case 'H':return 0x47u; /* Home */
+    case 'F':return 0x4Fu; /* End */
+    default:return 0u;
+    }
+}
+static uint8_t bb622_vt_function(unsigned c) {
+    switch(c) {
+    case 'P':return 0x3Bu; /* F1 */
+    case 'Q':return 0x3Cu; /* F2 */
+    case 'R':return 0x3Du; /* F3 */
+    case 'S':return 0x3Eu; /* F4 */
+    default:return 0u;
+    }
+}
+static uint8_t bb622_vt_tilde(unsigned n) {
+    switch(n) {
+    case 1u:case 7u:return 0x47u;  /* Home */
+    case 2u:return 0x52u;          /* Insert */
+    case 3u:return 0x53u;          /* Delete */
+    case 4u:case 8u:return 0x4Fu;  /* End */
+    case 5u:return 0x49u;          /* Page Up */
+    case 6u:return 0x51u;          /* Page Down */
+    case 11u:return 0x3Bu;case 12u:return 0x3Cu;
+    case 13u:return 0x3Du;case 14u:return 0x3Eu;
+    case 15u:return 0x3Fu;case 17u:return 0x40u;
+    case 18u:return 0x41u;case 19u:return 0x42u;
+    case 20u:return 0x43u;case 21u:return 0x44u;
+    case 23u:return 0x85u;case 24u:return 0x86u;
+    default:return 0u;
+    }
+}
+static void bb622_vt_expire(uint8_t *m,uint64_t now) {
+    if(bb622_vt_state && now-bb622_vt_last_us > 120000ull) {
+        if(bb622_vt_state==1u) bb_v23_enqueue_ascii(m,27u);
+        bb622_vt_state=0u;
+        bb622_vt_number=0u;
+    }
+}
+static void bb622_vt_feed(uint8_t *m,unsigned c,uint64_t now) {
+    uint8_t key=0u;
+    bb622_vt_expire(m,now);
+    if(c==27u) {
+        /* An ESC starts an ANSI sequence; a second ESC first commits the
+           prior standalone key instead of injecting terminal syntax. */
+        if(bb622_vt_state==1u)bb_v23_enqueue_ascii(m,27u);
+        bb622_vt_state=1u; bb622_vt_number=0u;bb622_vt_last_us=now;
+        return;
+    }
+    if(bb622_vt_state==0u){bb_v23_enqueue_ascii(m,c);return;}
+    bb622_vt_last_us=now;
+    if(bb622_vt_state==1u) {
+        if(c=='['){bb622_vt_state=2u;bb622_vt_number=0u;return;}
+        if(c=='O'){bb622_vt_state=3u;return;}
+        bb622_vt_state=0u;
+        /* An unrecognized ESC prefix is a genuine Escape key followed
+           by its literal character. */
+        bb_v23_enqueue_ascii(m,27u);
+        bb_v23_enqueue_ascii(m,c);
+        return;
+    }
+    if(bb622_vt_state==3u) {
+        key=bb622_vt_function(c);
+        if(!key)key=bb622_vt_cursor(c);
+        bb622_vt_state=0u;
+        bb622_vt_scancode(m,key);
+        return;
+    }
+    /* CSI: tolerate numeric private/modifier parameters but don't type
+       terminal control bytes into the DOS shell. */
+    if(c>='0' && c<='9') {
+        if(bb622_vt_number<1000u)bb622_vt_number=(uint16_t)(bb622_vt_number*10u+c-'0');
+        return;
+    }
+    if(c==';')return; /* ignore modifier parameters; use base scan code */
+    if(c=='~')key=bb622_vt_tilde(bb622_vt_number);
+    else key=bb622_vt_cursor(c);
+    bb622_vt_state=0u;
+    bb622_vt_number=0u;
+    bb622_vt_scancode(m,key);
+}
 static void bb_v23_poll_input(void) {
     if (!R) return;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -857,7 +973,10 @@ static void bb_v23_poll_input(void) {
         fflush(stdout);
         return;
     }
-    if(c>=0)bb_v23_enqueue_ascii(R->cpu.memory,(unsigned)c);
+    if (bb_sd_dos622_active()) {
+        if(c>=0)bb622_vt_feed(R->cpu.memory,(unsigned)c,bb_now_us());
+        else bb622_vt_expire(R->cpu.memory,bb_now_us());
+    } else if(c>=0)bb_v23_enqueue_ascii(R->cpu.memory,(unsigned)c);
 #endif
 }
 static void bb_v23_graphics_sample(void) {
@@ -1538,7 +1657,7 @@ static int start(MdRuntime *rt)
 #else
         printf("[bb622-irq0-ab] IRQ0 delivery ENABLED for DOS622 (control)\n"); fflush(stdout);
 #endif
-        bb622_textio_reset(); /* BB_DOS622_TEXTIO_PSRAM_V1 */
+        bb622_textio_reset(); bb622_vt_reset(); /* BB_DOS622_TEXTIO_PSRAM_V1 */
         printf("[bb622-diag] 10 before.dos622_boot\n"); fflush(stdout);
         if (!bb622_boot_floppy(rt)) {
             failed = 1; fail_reason = "DOS622 sector read failed"; return 0;
@@ -1742,6 +1861,15 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (R == NULL && !start(rt)) return 0;
     /* v23: JIT restored after mode 13h; the v19 control gate is removed. */
     bb_v23_poll_input();
+    /* BB_DOS622_LCD_TEXT_V2: refresh physical LCD during real DOS6 text mode.
+       The serial B800 mirror is only a diagnostic; the actual LCD needs this path. */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
+    if (R && rt==R && bb_sd_dos622_active() && !bb_vga_active()) {
+        extern void bb622_lcd_text_mirror(const uint8_t *guest);
+        bb622_lcd_text_mirror(rt->cpu.memory);
+    }
+#endif
+
     bb622_textio_mirror(rt);
     bb_diag_slice();                      /* v42: watchdog + last guest CS:IP */
     bb_v25_bios_time();

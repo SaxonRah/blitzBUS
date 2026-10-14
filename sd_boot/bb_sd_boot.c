@@ -367,6 +367,8 @@ static bool bb_sd_b_read_generic(uint32_t, uint8_t *, size_t);
  * Selection: /BLITZBUS/B_DISK.TXT one digit 1..5; reboot to change.
  * Reads are NOT cached, and disk images are NEVER modified.
  */
+/* BB_DOS622_FLOPPY_B_V1: actual physical B media, unlike DOS2's logical always-present unit. */
+bool bb_sd_dos622_b_image_ready(void) { return bb_b_open; }
 bool bb_sd_b_available(void) { return true; }
 bool bb_sd_b_read_sector(uint32_t sector, uint8_t *data, size_t size)
 {

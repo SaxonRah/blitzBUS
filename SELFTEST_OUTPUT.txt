@@ -1,48 +1,27 @@
-src/bb_live.c: 1890 -> 2089 SHA=3b75a69af1793906d46a6262488c3948e0e51bb6196c53dfc4ec119382b960ef -> a2fd8269f71746e46bd2e23789eedcc723f9180ba219a86c77072248d15abd05
-src/bb_dos622_atbios_v1.inc: NEW 4244 bytes SHA=7675871d4b1d467a0981849df506bc5a4f64a651d3b50f48b66bc208bd7cf1c6
-  .bb_dos622_boot_diag_v1_state/repair.json: SHA 104172b42bd6 -> 74a66eb71a14 (2 active SHA field(s))
-  .bb_dos622_heap_rescue_v1_state/manifest.json: SHA d346bc28d559 -> fa322c75c2c4 (2 active SHA field(s))
-  .bb_dos622_ipl_v1_state/manifest.json: SHA f536f16df204 -> a8b8cba87e7f (1 active SHA field(s))
-  .bb_dos622_keyb92_v1_state/manifest.json: SHA e4bf2367a4eb -> 5be34b8c086e (2 active SHA field(s))
-  .bb_dos622_vga12_30_v1_state/manifest.json: SHA b15918550e00 -> 7cae48f657a5 (1 active SHA field(s))
-  .bb_dos622_vga12_34_v1_state/manifest.json: SHA 12b587324e10 -> db643d1da435 (1 active SHA field(s))
-PROBE PASS: no files changed; 6 parent metadata files to update
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-APPLIED: DOS622-only VGA 8x16 font geometry + text strings; DOS2 and 386 core untouched
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-RESTORE PASS: exact pre-install files and metadata restored
-SELFTEST LF PASS parent SHA cascade, exact restore
-src/bb_live.c: 1924 -> 2125 SHA=19aaade351e78b778bb8eb05e0d691c21988637702c9190e9ced1867e2fb2ad5 -> 44cf52b51ac00f69af4d7a345d0323cf69749e84e5ee2aaf6b813663afb6c296
-src/bb_dos622_atbios_v1.inc: NEW 4244 bytes SHA=7675871d4b1d467a0981849df506bc5a4f64a651d3b50f48b66bc208bd7cf1c6
-  .bb_dos622_boot_diag_v1_state/repair.json: SHA a5100a4d425b -> ded33262fd86 (2 active SHA field(s))
-  .bb_dos622_heap_rescue_v1_state/manifest.json: SHA aef120566339 -> faa8310064d8 (2 active SHA field(s))
-  .bb_dos622_ipl_v1_state/manifest.json: SHA 0e92d26498d6 -> 56b05b29a581 (1 active SHA field(s))
-  .bb_dos622_keyb92_v1_state/manifest.json: SHA 2a27f83aae9b -> 20b652ce8446 (2 active SHA field(s))
-  .bb_dos622_vga12_30_v1_state/manifest.json: SHA fa0f89bb1054 -> cc2b35b7d465 (1 active SHA field(s))
-  .bb_dos622_vga12_34_v1_state/manifest.json: SHA 6465e7754b29 -> 2523fad2a6fc (1 active SHA field(s))
-PROBE PASS: no files changed; 6 parent metadata files to update
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-APPLIED: DOS622-only VGA 8x16 font geometry + text strings; DOS2 and 386 core untouched
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-RESTORE PASS: exact pre-install files and metadata restored
-SELFTEST CRLF PASS parent SHA cascade, exact restore
-src/bb_live.c: 1900 -> 2101 SHA=21b390ddd3fc6e1aab80da6417c79c5d3d6b42472a2589e3b89c6456117d06a3 -> c2ac5a7daafb619c2fb26ebbfe74d1177da903ed9daa6bf032527aa8c3812c9c
-src/bb_dos622_atbios_v1.inc: NEW 4244 bytes SHA=7675871d4b1d467a0981849df506bc5a4f64a651d3b50f48b66bc208bd7cf1c6
-  .bb_dos622_boot_diag_v1_state/repair.json: SHA 157d0545a932 -> be7e49198282 (2 active SHA field(s))
-  .bb_dos622_heap_rescue_v1_state/manifest.json: SHA fe34ad19a317 -> 6c487279f13b (2 active SHA field(s))
-  .bb_dos622_ipl_v1_state/manifest.json: SHA 0501a640b653 -> cade002971ef (1 active SHA field(s))
-  .bb_dos622_keyb92_v1_state/manifest.json: SHA 974702b2c39e -> 68393c21e8a2 (2 active SHA field(s))
-  .bb_dos622_vga12_30_v1_state/manifest.json: SHA 84f3142cd01e -> 2b4c7140a2fe (1 active SHA field(s))
-  .bb_dos622_vga12_34_v1_state/manifest.json: SHA 67eafe3e056a -> 8a86edb9e3a5 (1 active SHA field(s))
-PROBE PASS: no files changed; 6 parent metadata files to update
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-APPLIED: DOS622-only VGA 8x16 font geometry + text strings; DOS2 and 386 core untouched
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-VERIFY PASS: source + module + 6 parent metadata; backups intact
-RESTORE PASS: exact pre-install files and metadata restored
-SELFTEST MIXED PASS parent SHA cascade, exact restore
-SELFTEST anchor guards PASS
-SELFTEST C11 BIOS 1114/1104/1130 rejection/13h/DOS2 gate PASS
-SELFTEST PASS: BIOS Phase 1
+src/bb_vga.c: 253->1215 SHA 72ba7abecace->a98574aff4b8
+src/bb_live.c: 225->4690 SHA 0ae850a4979d->b25c65b284ac
+Parent metadata updates: 2; PROBE PASS; files untouched
+VERIFY PASS: 4 source/metadata files, original backups intact
+APPLIED: VGA INT10/AH=0B and DOS6 CDC VT key decoder; DOS2 unchanged
+VERIFY PASS: 4 source/metadata files, original backups intact
+VERIFY PASS: 4 source/metadata files, original backups intact
+RESTORE PASS: exact original source/manifest bytes
+SELFTEST LF: byte-exact source/metadata rollback PASS
+src/bb_vga.c: 261->1243 SHA e39d8e04e294->2e97a2d882f4
+src/bb_live.c: 231->4815 SHA 1feb6ac6df84->1531b0f6ed75
+Parent metadata updates: 2; PROBE PASS; files untouched
+VERIFY PASS: 4 source/metadata files, original backups intact
+APPLIED: VGA INT10/AH=0B and DOS6 CDC VT key decoder; DOS2 unchanged
+VERIFY PASS: 4 source/metadata files, original backups intact
+VERIFY PASS: 4 source/metadata files, original backups intact
+RESTORE PASS: exact original source/manifest bytes
+SELFTEST CRLF: byte-exact source/metadata rollback PASS
+[bb622-vtkey] scan=3B AX=3B00 queued=1
+[bb622-vtkey] scan=3D AX=3D00 queued=2
+[bb622-vtkey] scan=48 AX=4800 queued=3
+[bb622-vtkey] scan=86 AX=8600 queued=4
+[bb622-vtkey] scan=53 AX=5300 queued=5
+C11 keyboard sequences PASS
+C11 VGA 0Bh contract PASS
+SELFTEST PASS (Pico firmware and user hardware not tested)
+SELFTEST PASS: six-stage audit, latest corruption, historical backup corruption

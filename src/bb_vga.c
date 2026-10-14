@@ -4,6 +4,7 @@
  */
 #include "bb_vga.h"
 #include <string.h>
+#include <stdio.h>  /* BB_DOS622_VGA0B_STDIO_FIX_V1 */
 #define VMEM_SIZE 0x110000u
 static uint8_t *mem;
 /* v40: when blitz86 keeps the A000 window in SRAM, all VGA accesses here
@@ -12,6 +13,7 @@ static uint8_t *vram;
 #define VGA_A(o) (vram ? vram + ((o) - 0xA0000u) : mem + (o))
 void bb_vga_set_vram(uint8_t *p){vram=p;}
 static uint8_t mode, page, cols;
+static uint8_t cga_palette_select;
 static uint8_t dac[256][3], dac_read, dac_write, rc, wc, pel_mask, dac_read_mode;
 static uint8_t attr[32], attr_index, attr_flip, attr_enable=0x20, border;
 static uint8_t cga_index, seq_index, gfx_index, crtc_index, seq[8], gfx[16], crtc[32];
@@ -62,7 +64,7 @@ static void set_mode(uint8_t m,bool preserve){
     memset(cursor,0,sizeof cursor);video_bda();
 }
 void bb_vga_init(uint8_t *memory){
-    mem=memory; mode=3;page=0;cols=80;pel_mask=255;
+    mem=memory; mode=3;page=0;cols=80;pel_mask=255;cga_palette_select=0u;
     dac_read=dac_write=rc=wc=dac_read_mode=0;
     attr_flip=0;attr_index=0;dac_page=0;dac_page_mode=0;blink_enabled=1;
     memset(attr,0,sizeof attr);memset(seq,0,sizeof seq);
@@ -74,7 +76,11 @@ static void scroll_text(unsigned top,unsigned left,unsigned bottom,unsigned righ
     if(bottom>24)bottom=24;if(right>79)right=79;
     if(bottom<top||right<left)return;
     unsigned width=right-left+1,height=bottom-top+1;
-    if(n>height)n=height;
+    /* BB_DOS622_SCREEN_CLEAR_V1: INT 10h AH=06h/07h with AL=0
+       clears the entire window, NOT zero rows. Before this fix AH=06h
+       cleared nothing; AH=07h could wrap top+n-1 and write outside B800.
+       Preserve normal scrolling and cap oversize AL to the window height. */
+    if(n==0u || n>height)n=height;
     if(n&&n<height){
         if(down){for(int r=(int)bottom;r>=(int)(top+n);r--)memmove(mem+0xB8000+(r*80+left)*2,mem+0xB8000+((r-n)*80+left)*2,width*2);}
         else {for(unsigned r=top;r+n<=bottom;r++)memmove(mem+0xB8000+(r*80+left)*2,mem+0xB8000+((r+n)*80+left)*2,width*2);}
@@ -158,6 +164,25 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
         if(mode==3){unsigned p=*bx>>8&7u,cur=cursor[p],x=cur&255u,y=cur>>8;
             for(unsigned i=0;i<*cx;i++){unsigned xx=x+i,yy=y+xx/80u;xx%=80u;if(yy>=25)break;unsigned o=0xB8000+(yy*80+xx)*2;mem[o]=al;if(ah==9)mem[o+1]=(uint8_t)*bx;}return true;}
         return false;
+    /* BB_DOS622_VGA0B_KEYS_V1: IBM CGA-compatible INT10 AH=0Bh.
+       BH=00 changes overscan/border (not text memory), BH=01 chooses
+       CGA palette; no AX/FLAGS or guest framebuffer modification. */
+    case 0x0B:
+        if(mode != 3u && mode != 0x13u) return false;
+        if(((*bx >> 8) & 255u)==0u) border=(uint8_t)(*bx & 15u);
+        else if(((*bx >> 8) & 255u)==1u) cga_palette_select=(uint8_t)(*bx & 1u);
+        else return false;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+        { static unsigned bb622_vga0b_calls;
+          extern bool bb_sd_dos622_active(void);
+          if(bb_sd_dos622_active() && bb622_vga0b_calls++ < 8u) {
+              printf("[bb622-vga0b] INT10 AH=0B BH=%02X BL=%02X accepted; AX=%04X preserved\n",
+                  (unsigned)(*bx>>8), (unsigned)(*bx&255u), (unsigned)*ax);
+              fflush(stdout);
+          }
+        }
+#endif
+        return true;
     case 0x0C:
         if(mode==0x13&&*cx<320u&&*dx<200u){unsigned o=0xA0000+*dx*320u+*cx;
             if(al&128)*VGA_A(o)^=al&127;else *VGA_A(o)=al;return true;}return false;

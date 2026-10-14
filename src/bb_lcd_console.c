@@ -33,6 +33,8 @@ static unsigned row, col;
 static unsigned long characters, paint_rows, batches;
 static uint32_t next_status_ms;
 static int active;
+/* BB_DOS622_SCREEN_CLEAR_V1: DOS6 has a clean dedicated 80x25 LCD surface. */
+static uint8_t bb622_text_owns_lcd;
 static void draw_glyph(uint16_t *dst,unsigned pitch,unsigned xx,unsigned yy,unsigned char c,uint16_t fg,uint16_t bg){
     const uint8_t *g=gfx_font5x7[(c>=32 && c<=127 ? c: '?')-32];
     for(unsigned gy=0;gy<8;gy++) for(unsigned gx=0;gx<6;gx++)
@@ -126,7 +128,7 @@ void bb_lcd_console_init(void){
     puts("[blitzBUS] LCD panel init PASS");fflush(stdout);
     puts("[blitzBUS] LCD clear begin");fflush(stdout);
     mr_pico_ili9341_fill_screen(&lcd,0x0000u,480,320);puts("[blitzBUS] LCD clear PASS");fflush(stdout);
-    row=col=0;characters=paint_rows=batches=0;active=1;next_status_ms=0;
+    row=col=0;characters=paint_rows=batches=0;active=1;next_status_ms=0;bb622_text_owns_lcd=0u;
     bb_lcd_console_flush();
 }
 static void newline(void){
@@ -153,7 +155,54 @@ void bb_lcd_console_flush(void){
     batches++;
     for(unsigned r=0;r<ROWS;r++)if(dirty[r]){draw_row(r);dirty[r]=0;}
     uint32_t ms=to_ms_since_boot(get_absolute_time());
-    if((int32_t)(ms-next_status_ms)>=0){status_update();next_status_ms=ms+1000u;}
+    if(!bb622_text_owns_lcd && (int32_t)(ms-next_status_ms)>=0){status_update();next_status_ms=ms+1000u;}
+}
+
+/* BB_DOS622_LCD_TEXT_V2: LCD text-mode mirror from the real guest B800h RAM.
+ * This is an LCD observer only. The DOS guest, text BIOS, and DOS2 remain unchanged.
+ * Mirror runs at most 12.5 Hz, has no allocations, and flushes only changed rows.
+ * It operates on the existing 80x25/6x8 font and does not reset the VGA device. */
+void bb622_lcd_text_mirror(const uint8_t *guest)
+{
+    static uint32_t last_ms;
+    static uint8_t sampled;
+    static uint8_t first_change_logged;
+    if (!active || !guest) return;
+    if (!bb622_text_owns_lcd) {
+        /* DOS2 diagnostic HUD occupied the lower 120 physical pixels.
+           Clear the WHOLE panel exactly once at DOS6 text-mode takeover.
+           Invalidate every cached text cell so even spaces are repainted.
+           The DOS2/HUD path remains unchanged outside the DOS6 mirror. */
+        bb622_text_owns_lcd=1u;
+        mr_pico_ili9341_fill_screen(&lcd,0x0000u,480,320);
+        memset(cells,0,sizeof cells);
+        memset(dirty,1,sizeof dirty);
+        puts("[bb622-lcdclear] DOS6 text LCD takeover, full 480x320 clear; DOS2 HUD disabled");
+        fflush(stdout);
+    }
+    const uint32_t now_ms=to_ms_since_boot(get_absolute_time());
+    if (sampled && (uint32_t)(now_ms-last_ms) < 80u) return;
+    sampled=1u;
+    last_ms=now_ms;
+    const uint8_t *const text=guest+0xB8000u;
+    unsigned changed_rows=0;
+    for (unsigned y=0; y<ROWS; ++y) {
+        unsigned dirty_row=0;
+        for (unsigned x=0; x<COLS; ++x) {
+            const uint8_t raw=text[(y*COLS+x)*2u];
+            const uint8_t ch=(raw>=32u && raw<=126u) ? raw : (uint8_t)' ';
+            if (cells[y][x] != ch) { cells[y][x]=ch; dirty_row=1u; }
+        }
+        if (dirty_row) { dirty[y]=1u; ++changed_rows; }
+    }
+    if (changed_rows) {
+        bb_lcd_console_flush();
+        if (!first_change_logged) {
+            first_change_logged=1u;
+            printf("[bb622-lcdtext] B800 text shown on LCD; updated-rows=%u\n",changed_rows);
+            fflush(stdout);
+        }
+    }
 }
 
 /* v27: MicroRender's DMA presenter on core 1.

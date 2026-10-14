@@ -1,0 +1,157 @@
+{
+  "screen": [
+    "REPLACE  EX_        12,835 05/31/94   6:22a",
+    "RESTORE  EX_        23,380 05/31/94   6:22a",
+    "SCANDISK EXE       124,262 05/31/94   6:22a",
+    "SCANDISK INI         6,920 05/31/94   6:22a",
+    "SETUP    EXE        72,842 05/31/94   6:22a",
+    "SETUP    MSG         1,830 05/31/94   6:22a",
+    "SYS      COM         9,432 05/31/94   6:22a",
+    "XCOPY    EX_        11,093 05/31/94   6:22a",
+    "       41 file(s)      1,200,072 bytes",
+    "                         247,296 bytes free",
+    "",
+    "A:\\>b:",
+    "",
+    "B:\\>dir",
+    "",
+    " Volume in drive B is DESCENT1",
+    " Directory of B:\\",
+    "",
+    "INSTALL  EXE        50,249 02/12/95   9:11p",
+    "DESCENT1 SOW     1,406,331 02/15/95   5:30p",
+    "        2 file(s)      1,456,580 bytes",
+    "                             512 bytes free",
+    "",
+    "B:\\>install",
+    ""
+  ],
+  "updates": 191,
+  "top_tags": [
+    [
+      "bb622-screen",
+      191
+    ],
+    [
+      "bb622-irq",
+      111
+    ],
+    [
+      "bb-trace",
+      48
+    ],
+    [
+      "bb622-ivt",
+      37
+    ],
+    [
+      "bb-v23",
+      28
+    ],
+    [
+      "bb622-key-ab",
+      28
+    ],
+    [
+      "bb-v62-vec",
+      24
+    ],
+    [
+      "bb622-watch",
+      19
+    ],
+    [
+      "perf",
+      17
+    ],
+    [
+      "qmi",
+      16
+    ],
+    [
+      "bb622-diag",
+      15
+    ],
+    [
+      "bb-dos622",
+      10
+    ],
+    [
+      "blitzBUS",
+      9
+    ],
+    [
+      "bb622-hdd",
+      9
+    ],
+    [
+      "bb622-p61",
+      8
+    ],
+    [
+      "bb-sd-b",
+      7
+    ],
+    [
+      "bb622-serial14",
+      4
+    ],
+    [
+      "rep",
+      4
+    ],
+    [
+      "bb-v29-clock",
+      3
+    ],
+    [
+      "bb-v22",
+      3
+    ],
+    [
+      "bb622-printer17",
+      3
+    ],
+    [
+      "bb622-rtc1a",
+      3
+    ],
+    [
+      "bb-sd",
+      2
+    ],
+    [
+      "bb-sd-c",
+      2
+    ]
+  ],
+  "errors": [
+    "[bb622-missing-bios] unhandled INT 10 AX=1203 BX=0010 CX=0000 DX=0006 at=11E2:862D; null IVT, stopping safely",
+    "[microDOS] guest stopped: fault"
+  ],
+  "checkpoints": [
+    "[bb622-hdd] BIOS 80h mounted RW 65x16x63, 65520 sectors, partition LBA 63, FAT16",
+    "[bb622-floppyb] BIOS DL=01 physical B: read-only 1.44MiB, two-drive equipment",
+    "[bb622-lcdclear] DOS6 text LCD takeover, full 480x320 clear; DOS2 HUD disabled",
+    "[bb-sd-b] read disk=1 lba=1 OK",
+    "[bb-sd-b] read disk=1 lba=0 OK",
+    "[bb622-screen] row=24 |B:\\>|",
+    "[bb622-screen] row=24 |B:\\>c|",
+    "[bb622-screen] row=24 |B:\\>cir|",
+    "[bb622-screen] row=24 |B:\\>ci|",
+    "[bb622-screen] row=24 |B:\\>|",
+    "[bb622-screen] row=24 |B:\\>d|",
+    "[bb622-screen] row=24 |B:\\>dir|",
+    "[bb-sd-b] read disk=1 lba=19 OK",
+    "[bb-sd-b] read disk=1 lba=0 OK",
+    "[bb-sd-b] read disk=1 lba=1 OK",
+    "[bb-sd-b] read disk=1 lba=0 OK",
+    "[bb622-screen] row=14 |B:\\>dir|",
+    "[bb622-screen] row=24 |B:\\>|",
+    "[bb622-screen] row=24 |B:\\>in|",
+    "[bb622-screen] row=24 |B:\\>inst|",
+    "[bb622-screen] row=24 |B:\\>instal|",
+    "[bb622-screen] row=13 |B:\\>dir|",
+    "[bb622-screen] row=23 |B:\\>install|"
+  ]
+}

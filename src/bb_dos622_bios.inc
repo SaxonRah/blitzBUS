@@ -23,10 +23,65 @@ static void BB622_FLASH bb622_status(MdX86 *c, uint8_t status, uint8_t count)
 /* BB_DOS622_HDD_V1: BIOS 80h service */
 #include "bb_dos622_hdd_bios_v1.inc"
 
+/* BB_DOS622_FLOPPY_B_V1: separate, read-only BIOS floppy DL=01h.
+ * Physical A is DOS622.IMG, physical B is the already-opened DESCENTn.IMG.
+ * Both are 80 cylinders, 2 heads, 18 sectors; never redirect B onto A.
+ */
+extern bool bb_sd_dos622_b_image_ready(void);
+extern bool bb_sd_b_read_sector(uint32_t lba,uint8_t *dst,size_t size);
+static bool BB622_FLASH bb622_b_floppy_int13(MdRuntime *rt)
+{
+    MdX86 *c=&rt->cpu;
+    const uint16_t ax=c->r[MD_X86_AX],cx=c->r[MD_X86_CX],dx=c->r[MD_X86_DX];
+    const uint8_t fn=(uint8_t)(ax>>8),count=(uint8_t)ax;
+    uint32_t cyl,sec,head,lba,i;
+    uint16_t flags;
+    if(!bb_sd_dos622_b_image_ready()) {bb622_status(c,0x80u,0u);return true;}
+    if(fn==0x00u) {bb622_status(c,0u,0u);return true;}
+    if(fn==0x01u) {bb622_status(c,bb622_disk_status,0u);return true;}
+    if(fn==0x08u) {
+        c->r[MD_X86_CX]=0x4F12u;
+        c->r[MD_X86_DX]=0x0102u; /* max head 1, TWO physical floppies */
+        c->r[MD_X86_BX]=(uint16_t)((c->r[MD_X86_BX]&0xFF00u)|4u);
+        c->es=0x0050u;
+        c->r[MD_X86_DI]=0x0100u;
+        bb622_status(c,0u,0u);return true;
+    }
+    if(fn==0x15u) {
+        c->r[MD_X86_AX]=0x0100u; /* floppy present */
+        flags=md_x86_flags(c);
+        md_x86_set_flags(c,(uint16_t)(flags&~MD_X86_FLAG_CF));
+        return true;
+    }
+    if(fn==0x16u) {bb622_status(c,0u,0u);return true;}
+    if(fn==0x03u || fn==0x05u) {bb622_status(c,0x03u,0u);return true;} /* write protected */
+    if(fn!=0x02u && fn!=0x04u) {bb622_status(c,0x01u,0u);return true;}
+    cyl=(uint32_t)(cx>>8)|(((uint32_t)cx&0xC0u)<<2);
+    sec=(uint32_t)cx&0x3Fu;
+    head=(uint32_t)(dx>>8);
+    if(!count || cyl>=80u || head>=2u || !sec || sec>18u) {
+        bb622_status(c,0x04u,0u);return true;
+    }
+    lba=(cyl*2u+head)*18u+(sec-1u);
+    if(lba+(uint32_t)count>2880u) {bb622_status(c,0x04u,0u);return true;}
+    if((uint32_t)c->r[MD_X86_BX]+(uint32_t)count*512u>65536u) {
+        bb622_status(c,0x09u,0u);return true;
+    }
+    for(i=0;i<count;i++) {
+        if(!bb_sd_b_read_sector(lba+i,bb622_sector,512u)) {
+            bb622_status(c,0x20u,(uint8_t)i);return true;
+        }
+        if(fn==0x02u)md_x86_write_block(c,c->es,
+            (uint16_t)(c->r[MD_X86_BX]+i*512u),bb622_sector,512u);
+    }
+    bb622_status(c,0u,count);
+    return true;
+}
 static bool BB622_FLASH bb622_int13(MdRuntime *rt)
 {
     MdX86 *c = &rt->cpu;
     if ((uint8_t)c->r[MD_X86_DX] == 0x80u) return bb622_hd_int13(rt); /* BB_DOS622_HDD_V1 */
+    if ((uint8_t)c->r[MD_X86_DX] == 0x01u) return bb622_b_floppy_int13(rt); /* BB_DOS622_FLOPPY_B_V1 */
     const uint16_t ax = c->r[MD_X86_AX], cx = c->r[MD_X86_CX], dx = c->r[MD_X86_DX];
     const uint8_t fn = (uint8_t)(ax >> 8), count = (uint8_t)ax, drive = (uint8_t)dx;
     uint32_t lba, cylinder, sector, head, i;
@@ -38,7 +93,7 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
     if (fn == 0x08u) {
         if (drive != 0u) { bb622_status(c, 0x80u, 0u); return true; }
         c->r[MD_X86_CX] = 0x4F12u; /* cylinder 79, 18 sectors/track */
-        c->r[MD_X86_DX] = 0x0101u; /* head 1, 1 floppy drive */
+        c->r[MD_X86_DX] = bb_sd_dos622_b_image_ready()?0x0102u:0x0101u; /* max head 1, physical drive count */
         c->r[MD_X86_BX] = (uint16_t)((c->r[MD_X86_BX] & 0xFF00u) | 4u); /* 1.44MB */
         c->es = 0x0050u;
         c->r[MD_X86_DI] = 0x0100u;
@@ -93,7 +148,7 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
     case 0x14u: return bb622_serial14(rt);
     case 0x17u: return bb622_printer17(rt);
     case 0x13u: return bb622_int13(rt);
-    case 0x11u: c->r[MD_X86_AX] = 0x0021u; return true; /* CGA, floppy */
+    case 0x11u: c->r[MD_X86_AX] = bb_sd_dos622_b_image_ready()?0x0061u:0x0021u; return true; /* CGA, one/two floppies */
     case 0x12u: c->r[MD_X86_AX] = 640u; return true;
     case 0x15u:
         if ((c->r[MD_X86_AX] >> 8) == 0x88u) {
@@ -157,7 +212,7 @@ static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
     md_x86_write16(c, 0x0000u, 0x0078u, 0x0100u); /* INT1E floppy table */
     md_x86_write16(c, 0x0000u, 0x007Au, 0x0050u);
     for (i = 0; i < sizeof dpt; ++i) md_x86_write8(c, 0x0050u, (uint16_t)(0x0100u + i), dpt[i]);
-    md_x86_write16(c, 0x0040u, 0x0010u, 0x0021u); /* equipment */
+    md_x86_write16(c, 0x0040u, 0x0010u, bb_sd_dos622_b_image_ready()?0x0061u:0x0021u); /* BB_DOS622_FLOPPY_B_V1 physical equipment */
     md_x86_write16(c, 0x0040u, 0x0013u, 640u);    /* conventional KiB */
     md_x86_write8(c, 0x0040u, 0x0075u, bb_sd_hdd_available()?1u:0u); /* BB_DOS622_HDD_V1: real BIOS 80h */
     c->cs = c->ds = c->es = c->ss = 0u;
@@ -166,6 +221,7 @@ static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
     c->r[MD_X86_DX] &= 0xFF00u; /* DL=00 BIOS A: */
     md_x86_set_flags(c, MD_X86_FLAG_ALWAYS1 | MD_X86_FLAG_IF);
     md_runtime_mark_code_range(rt, 0u, 0x7C00u, 512u);
+    if(bb_sd_dos622_b_image_ready()) printf("[bb622-floppyb] BIOS DL=01 physical B: read-only 1.44MiB, two-drive equipment\n");
     printf("[bb-dos622] ENTER real boot sector 0000:7C00, BIOS DL=00; image read-only\n");
     return true;
 }

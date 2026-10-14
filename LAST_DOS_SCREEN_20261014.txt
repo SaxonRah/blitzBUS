@@ -1,0 +1,25 @@
+REPLACE  EX_        12,835 05/31/94   6:22a                                     
+RESTORE  EX_        23,380 05/31/94   6:22a                                     
+SCANDISK EXE       124,262 05/31/94   6:22a                                     
+SCANDISK INI         6,920 05/31/94   6:22a                                     
+SETUP    EXE        72,842 05/31/94   6:22a                                     
+SETUP    MSG         1,830 05/31/94   6:22a                                     
+SYS      COM         9,432 05/31/94   6:22a                                     
+XCOPY    EX_        11,093 05/31/94   6:22a                                     
+       41 file(s)      1,200,072 bytes                                          
+                         247,296 bytes free                                     
+                                                                                
+A:\>b:                                                                          
+                                                                                
+B:\>dir                                                                         
+                                                                                
+ Volume in drive B is DESCENT1                                                  
+ Directory of B:\                                                               
+                                                                                
+INSTALL  EXE        50,249 02/12/95   9:11p                                     
+DESCENT1 SOW     1,406,331 02/15/95   5:30p                                     
+        2 file(s)      1,456,580 bytes                                          
+                             512 bytes free                                     
+                                                                                
+B:\>install                                                                     
+                                                                                

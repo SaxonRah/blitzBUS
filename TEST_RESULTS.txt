@@ -1,0 +1,5 @@
+LCD V2 selftest: PASS LF; PASS CRLF; PASS misplaced-HDD-marker refusal; PASS C11 B800 mirror.
+Lineage validator selftest: PASS ATBIOS->HDD; PASS ATBIOS->HDD->LCD; PASS corruption refusal.
+Integrated synthetic install/verify/audit/rollback: PASS.
+GitHub HEAD inspected: a0e2dbf756d3c9c3d8cfd6f43f08d2a6afd90298.
+Pico compile + physical LCD: NOT TESTED.
