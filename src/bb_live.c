@@ -77,6 +77,15 @@ uint64_t bb_now_us(void)
 }
 #endif
 
+/* BB_386_PM0_V1: optional 386 interpreter smoke, isolated from DOS. */
+#ifndef BB386_PICO_PROBE
+#define BB386_PICO_PROBE 1
+#endif
+/* BB_386_PM0_INCLUDE_FIX1: SDK PSRAM macro and libc must be declared first. */
+#if BB386_PICO_PROBE
+#include "bb_386_pico_probe.inc"
+#endif
+
 #ifndef BB_TR_PAGES
 #define BB_TR_PAGES 24u            /* byte-exact pages (512 B bitmap each, SRAM); v41: 64 -> 24 (DOS runs used 15) */
 #endif
@@ -1311,7 +1320,11 @@ static int start(MdRuntime *rt)
     bb_vga_init(rt->cpu.memory);
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
-    b86_init(&C, rt->cpu.memory);      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
+    b86_init(&C, rt->cpu.memory);
+#if BB386_PICO_PROBE && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    /* Private PSRAM CPU; guest HMA bytes saved/restored; never changes C. */
+    (void)bb386_test_run(rt->cpu.memory);
+#endif      /* guest buffer >= B86_MEM_BYTES (A20-on model) */
 #ifndef BB_CPU_MODEL
 #define BB_CPU_MODEL 0u
 #endif
