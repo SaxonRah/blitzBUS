@@ -1,83 +1,72 @@
-# blitzBUS DOS 6.22 — IRQ0 one-shot experiment V1
+# blitzBUS
 
-This is a **bounded diagnostic experiment**, not a proven fix. In the same-run PIC test, Descent read IRR=01 (IRQ0 pending) and remained at `0FF2:87A2–87C2`; the scheduler advanced and **delivered=0**. Next we must distinguish a missing guest IRQ service from an emulator inability to observe IF-enabled instruction boundaries.
+**blitzBUS** is an RP2350/Pimoroni Pico Plus 2 DOS-machine project that combines the **microDOS** runtime, **blitz86** x86 translation/interpreter, PSRAM, SD-backed disks, and an SPI LCD. The project is under active development; some features and test programs are experimental.
 
-**Prerequisites:** Existing `BB622_PIC_PENDING_V1` firmware source applied and verified, and `BB622_PIC_HOST_CONTROL_V1` host controls applied and verified. Existing host runner `scripts/bb_live_run_dos622_pic_control.ps1` must match its install manifest. Keep your working C: hard-disk image and all floppy images untouched. Back up `DOS622_HDD.IMG` before reattempting the Descent installer, since Descent writes to C:.
+## Current status (October 2026)
 
-**Safety:** The firmware *does not* enable IRQ0 during DOS startup. The user explicitly arms Ctrl+U through a second-window command. It attempts **at most one legitimate guest IRQ0** using the existing PIC dispatcher, observing its normal IF/IMR/ISR/IVT eligibility checks; after that delivery it automatically switches OFF. If no delivery happens in 8 seconds, it automatically switches OFF and reports why. The experiment does **not** force interrupts while IF=0 and does not bypass the interrupt gate; it cannot guarantee the old interrupt-stability problem won't recur if the first interrupt actually executes. A reboot clears the trial state. This layer does not enable repeated timer interrupts or implement STI instruction-boundary handling.
+- Genuine **MS-DOS 6.22** boots from a writable FAT16 hard-disk image (`DOS622_HDD.IMG`) on the Pico Plus 2.
+- The DOS console, color LCD text output, keyboard input, and read-only B: floppy image mounting are working for tested cases.
+- The Descent installer reads its first floppy and writes files to C:, but **stalls before prompting for disk 2**.
+- PIT channel 0 and the PIC are emulated, but DOS 6.22's regular guest IRQ0 delivery is still disabled. A *single* test IRQ0 reached its handler, after which guest execution entered invalid control flow. **Do not treat the IRQ0 one-shot as a fix or enable continuous IRQ0 delivery.**
+- 286 real-mode execution and 386-related smoke tests exist; this is not a claim of complete 386/486 or protected-mode support.
 
-## 1. Extract, test, probe, apply
+Read [the IRQ0 one-shot experiment](docs/experiments/IRQ0_ONE_SHOT_TRIAL_V1.md) before repeating that diagnostic. A **reboot is required** after an IRQ-related guest-state failure.
 
-Extract the *top-level* Python file plus its five imported dependency scripts into `C:\blitzBUS`. **Do not overwrite your existing dependencies if they differ:** the ZIP contains reference copies for standalone self-tests; use your already-installed originals. Run:
+## Repository layout
 
-```powershell
-cd C:\blitzBUS
-python .\bb622_pic_pending_v1.py verify
-python .\bb622_pic_host_control_v1.py verify
-python .\bb622_irq0_trial_v1.py selftest
-python .\bb622_irq0_trial_v1.py probe
+| Path | Role |
+| --- | --- |
+| `src/` | blitzBUS runtime, emulator integration, VGA/PIT/PIC and DOS BIOS adapters |
+| `sd_boot/` | SD-card boot, FAT-backed media, virtual floppy and HDD access |
+| `scripts/` | Build/install runners, firmware upload, local diagnostics and utilities |
+| `tests/` | Source-level regression and smoke tests |
+| `pico/` | RP2350-facing integration |
+| `BB_*` tool folders | Historical FAT, disk-image and Descent maintenance utilities; review their README before running |
+| `.bb_*_state/`, `.bb622_*_state/` | **Required installer backup/manifest history** for byte-exact verification and rollback; do not casually remove |
+| `games/`, `media/`, `dos_bench/` | Historical test media and fixtures; some third-party assets may require separate rights |
+| `milestones/` | Historical baselines, not the current build target |
+
+[Repository hygiene and audit instructions](docs/REPOSITORY_CLEANUP.md) distinguish live files from local/generated data and historical backups.
+
+## Building and running
+
+The development environment uses **three separate working trees**:
+
+```text
+C:\blitzBUS
+C:\microDOS
+C:\blitz86_v2
 ```
 
-If `probe` passes and you have backed up your HDD image:
-
-```powershell
-python .\bb622_irq0_trial_v1.py apply
-python .\bb622_irq0_trial_v1.py verify
-python .\bb622_lineage_verify_v13.py verify
-```
-
-The Python installer updates the checked source and installed current-SHA metadata as a *new*, independently reversible stage. Old original hashes and backup copies are not changed. The new host runner is cloned from the verified current PIC-control host runner; existing Ctrl+Y and Alt+G controls remain.
-
-## 2. Rebuild and flash *once*
-
-Use the same environment variables you already use, then:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File `
-    .\scripts\bb_live_run_dos622_irqtrial.ps1 `
-    -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 `
-    -Port COM5 -Seconds 0 -ConsoleView Screen
-```
-
-For the initial run, **do not** specify `-NoBuild` or `-NoFlash`. If the board cannot enter BOOTSEL, use your established manual BOOTSEL method and verify the newly built image was flashed before testing. The installer should be left running; there is only one process allowed to own COM5.
-
-## 3. Reproduce Descent's stall and arm exactly one guest IRQ0
-
-Keep the DOS-console window open. From a separate PowerShell window run:
+`bb.bat` supplies the original project-level `install`, `build`, and `run` entry points. For the most recent DOS 6.22 experiment, inspect `scripts/bb_live_run_dos622_irqtrial.ps1` and its prerequisites first. A typical interactive runner invocation is:
 
 ```powershell
 cd C:\blitzBUS
 powershell -NoProfile -ExecutionPolicy Bypass -File `
-    .\scripts\bb622_irq0_trial.ps1 -TimeoutSeconds 15
+  .\scripts\bb_live_run_dos622_irqtrial.ps1 `
+  -MicroDOS C:\microDOS -Blitz86 C:\blitz86_v2 `
+  -Port COM5 -Seconds 0 -ConsoleView Screen
 ```
 
-Expect an actual `PICO ACK: [bb622-irqtrial] ARMED` line. The requester reads only newly appended bytes from the same raw log and demands the host `SENT` marker before accepting the Pico acknowledgement. Once armed, the firmware will log one of:
+The above runner is **experimental**, not a validated stable release. Make sure the Pico is actually flashed with the image you built; a successful compilation alone does not flash hardware. Only one application may own COM5 at a time. Run the sidecar log viewer in a separate window to preserve copyable diagnostics.
 
-- `[bb622-irqtrial] DELIVERED one guest IRQ0; AUTO-OFF ...`
-- `[bb622-irqtrial] TIMEOUT no guest IRQ0 delivered; AUTO-OFF ... if0_delta=... masked_delta=...`
+## Safety and verification
 
-If a crash or hardfault occurs while testing, leave the HDD intact and reboot into the known-good firmware. Do not repeatedly arm without inspecting the log first.
+**Do not remove the installer state directories or rewrite them as part of a tidy-up.** Later installers verify not only the current source SHA, but also the exact prior states and backup bytes. Retain the original installer scripts while these checks are in use.
 
-After 10 seconds, obtain a permanent report in another window:
+Disk images are separate from source files. Back up `DOS622_HDD.IMG` before any experiment that writes to C:. Never rewrite, shrink, clean, or reinitialize a working SD image merely to reduce Git size. This repository still contains tracked media and historical disk images; `.gitignore` does not stop Git from tracking changes to files that were already committed.
+
+To audit tracked files and exact duplicate Git blobs locally without modifying anything:
 
 ```powershell
-python .\bb622_irq0_report.py --root C:\blitzBUS
+python .\scripts\repo_audit.py --root C:\blitzBUS
+python .\scripts\repo_audit.py --root C:\blitzBUS --json
 ```
 
-**Send:** The trial command's acknowledgement, `bb622_irq0_report.py` output, and any `bb-v36-irq` or hardfault lines. That identifies whether the one interrupt was delivered, not deliverable because IF or PIC mask stayed disabled, or delivered into a broken ISR path.
+## Development references
 
-## 4. Roll back this new layer
+- [Source repository](https://github.com/SaxonRah/blitzBUS)
+- [microDOS](https://github.com/SaxonRah/microDOS)
+- [Repository cleanup notes](docs/REPOSITORY_CLEANUP.md)
 
-Stop the runner. While the source SHA still matches the installed state:
-
-```powershell
-python .\bb622_irq0_trial_v1.py verify
-python .\bb622_irq0_trial_v1.py restore
-python .\bb622_pic_pending_v1.py verify
-```
-
-Then rebuild/flash the previous firmware if you want to return to its behavior. Never remove earlier stages to roll back this one.
-
-## Validation scope
-
-LF and CRLF source transformations, one-delivery gate, timeout diagnostics, host request string and byte-exact rollback have passed synthetic self-tests. **No real Pico compilation or Descent continuation has been executed in this environment.** The first real IRQ0 may still cause a guest fault. Avoid claiming success until the Pico tests report `DELIVERED` *and* Descent advances safely.
+The experimental work is still in progress. Preserve diagnostic logs from a failed boot rather than assuming CPU progress means DOS or a game has made forward progress.
