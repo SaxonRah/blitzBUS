@@ -1,0 +1,10 @@
+^C:\BLITZBUS\BB_IRQ0_HOSTDIAG_V1\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/blitzBUS/bb_irq0_hostdiag_v1 -BC:/blitzBUS/bb_irq0_hostdiag_v1/build-host --check-stamp-file C:/blitzBUS/bb_irq0_hostdiag_v1/build-host/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

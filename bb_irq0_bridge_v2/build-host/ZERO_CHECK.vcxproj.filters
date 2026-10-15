@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\blitzBUS\bb_irq0_bridge_v2\build-host\CMakeFiles\6a2de63ed6a3a920da422c3e1015d559\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{46192D2A-8B09-3649-B02B-8F571E224E70}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

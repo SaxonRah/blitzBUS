@@ -21,7 +21,7 @@ Existing commands (unchanged):
   bb.bat install | upgrade | restore | build | run
 
 DOS 6.22:
-  bb.bat dos boot [-NoBuild] [-NoFlash] [-Port COM5] [-Seconds 0] [-ConsoleView Screen]
+  bb.bat dos boot [-NoBuild] [-NoFlash] [-Port COM5] [-Seconds 0] [-ConsoleView Events] [-NoColorWindow]
   bb.bat dos verify
   bb.bat dos diagnose [--log PATH] [--tail N]
 
@@ -35,7 +35,7 @@ Tools:
   bb.bat tools run FILE.py [tool-arguments...]
 
 Notes:
-  - DOS boot uses scripts/bb_live_run_dos622_irqtrial.ps1, which is EXPERIMENTAL.
+  - DOS boot uses the original EXPERIMENTAL runner, plus a log-only second VGA color window.
     It builds/flashes by default. Stop other COM5 owners before starting it.
     Guest IRQ0 one-shot remains OFF until explicitly armed by its separate tool.
   - diagnose, verify, CPU test/audit and tools list/audit do not open COM5.
@@ -79,7 +79,8 @@ def dos_boot(argv: list[str]) -> int:
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *args]))
         return 0
     print("Experimental DOS 6.22 runner. Stop other COM5 users; build/flash enabled unless -NoBuild/-NoFlash.", flush=True)
-    return execute(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), *argv], label="DOS 6.22 BOOT")
+    # BB_DOS_DUAL_CONSOLE_V1: protected runner stays byte-exact; two host windows share one log.
+    return python_script("scripts/bb_dos_dual_launch.py", argv, "DOS 6.22 BOOT (dual console)")
 
 
 def dos_verify(argv: list[str]) -> int:
