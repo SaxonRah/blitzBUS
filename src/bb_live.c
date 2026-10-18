@@ -2136,9 +2136,28 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
                 /* Run original PIC dispatcher only at the synchronized MD
                    guest slice boundary; it checks IF, IMR, ISR and IVT. */
                 const uint64_t irq_now=bb_now_us();
-                bb622_post_before(rt);
+                /* BB622_IRQ0_CAPTURE_GUARD_V1: pre-schedule at the same slice
+                 * timestamp used by the dispatcher. The second schedule in
+                 * dispatch is idempotent. No guest/PIC/CPU state is changed
+                 * between scheduling and dispatch. Only dump the PRE frame
+                 * when every normal PIC dispatch gate is already eligible.
+                 * Without this guard, every IF=0 poll emits a large USB log.
+                 */
+                bb_irq36_schedule(irq_now);
+                const uint32_t bb622_irqv=(uint32_t)bb_irq36.base*4u;
+                const uint8_t *bb622_ivt=rt->cpu.memory+bb622_irqv;
+                const int bb622_irq_eligible=
+                    (bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u) &&
+                    !(bb_irq36.isr & 1u) &&
+                    (md_x86_flags(&rt->cpu) & 0x0200u) &&
+                    (bb622_ivt[0] | bb622_ivt[1] | bb622_ivt[2] | bb622_ivt[3]);
+                if(bb622_irq_eligible) bb622_post_before(rt);
                 const int was_delivered=bb_irq36_dispatch(rt,irq_now);
-                if(was_delivered) { bb622_post_accepted(rt); bb622_steptrace_arm(rt); }
+                if(was_delivered) {
+                    if(bb622_irq_eligible) bb622_post_accepted(rt);
+                    else printf("[bb622-postirq] UNEXPECTED delivery without eligible snapshot\n");
+                    bb622_steptrace_arm(rt);
+                }
                 if(!was_delivered) bb622_irq0_reason_diag(rt,irq_now,"trial");
                 if(was_delivered){
                     bb622_irq0_trial_armed=0u;

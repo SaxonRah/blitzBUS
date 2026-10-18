@@ -68,7 +68,7 @@ enum {
 };
 
 /* Return codes from b86_step / b86_run. */
-enum { B86_OK = 0, B86_HALT = 1, B86_EXIT = 2, B86_BUDGET = 3, B86_TRAP = 4, B86_UNSUPPORTED = 5 };
+enum { B86_OK = 0, B86_HALT = 1, B86_EXIT = 2, B86_BUDGET = 3, B86_TRAP = 4, B86_UNSUPPORTED = 5, B86_SHUTDOWN = 6 };
 
 struct B86Cpu;
 typedef uint8_t (*B86In8)(struct B86Cpu *, uint16_t port);
@@ -80,6 +80,19 @@ typedef void    (*B86SmcHook)(struct B86Cpu *, uint32_t lin, uint32_t len);
 typedef void    (*B86CodeHook)(struct B86Cpu *, uint32_t lin, uint32_t len);
 
 enum { B86_CPU_8086 = 0, B86_CPU_186 = 1, B86_CPU_286 = 2, B86_CPU_386 = 3 }; /* BB_386_RM0_V1: 386 real mode */   /* B86Cpu.model (286: real mode) */
+
+/* BB_386_STAGE5C5C_V1: appended shadow caches, no native-hot offsets changed. */
+typedef struct B86PM1Cache {
+    uint32_t base, limit;
+    uint16_t selector;
+    uint8_t access, flags, valid, reserved;
+} B86PM1Cache;
+typedef struct B86PM1State {
+    B86PM1Cache seg[6]; /* ES,CS,SS,DS,FS,GS; CS not activated in 5C5C */
+    uint32_t ldtr_base, ldtr_limit;
+    uint16_t ldtr_selector;
+    uint8_t ldtr_valid, reserved;
+} B86PM1State;
 
 typedef struct B86Cpu {
     /* --- hot block: generated code touches these ------------------------ */
@@ -147,6 +160,8 @@ typedef struct B86Cpu {
 #endif
     /* BB_386_RM3_V1: appended only; old generated-code offsets unchanged. */
     uint16_t seg386[2];   /* FS and GS selectors, real mode */
+    uint32_t shutdown386; /* BB_386_STAGE5C4A_V1: sticky 386 shutdown until b86_init */
+    B86PM1State pm386; /* Not active in interpreter/JIT until PE is implemented. */
 } B86Cpu;
 
 /* Host pointer for a guest linear address (honours mapped pages). */
@@ -238,6 +253,14 @@ void     b86_jit_set_count_retired(struct B86Jit *j, int on);
 /* Optional shadow (B86_MEM_BYTES) of translated guest bytes; enables
    byte-exact b86_jit_sync_external. Set before translating anything. */
 void     b86_jit_set_shadow(struct B86Jit *j, uint8_t *shadow);
+/* B86_SPARSE_SHADOW_V1: optional, bounded PSRAM snapshots of translated
+   64-byte guest lines. index has B86_LINES zero-initialized uint16_t entries;
+   slot_storage has slot_count * (1u << B86_LINE_SHIFT) bytes. The JIT clears
+   index on attachment; storage is caller-owned. A full pool conservatively
+   invalidates unsnapshotted code lines, never executes stale translations.
+   Configure before translating any code, not during guest execution. */
+void     b86_jit_set_sparse_shadow(struct B86Jit *j, uint16_t *index,
+                                   uint8_t *slot_storage, uint32_t slot_count);
 /* Memory in [lin, lin+len) may have been written by someone else: kill only
    translations whose bytes actually changed. Returns lines that differed. */
 uint32_t b86_jit_sync_external(struct B86Jit *j, uint32_t lin, uint32_t len);

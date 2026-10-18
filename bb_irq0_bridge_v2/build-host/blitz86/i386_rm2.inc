@@ -38,7 +38,7 @@ static   unsigned b86_rm2_bits(uint32_t x, unsigned width, int reverse)
  * the quotient uses mathematical floor (C / rounds negative toward zero).
  * An imm8 bit offset is unsigned.  In registers both forms are masked. */
 static   int b86_rm2_bitpos(B86RM1EA *ea, unsigned width,
-                                   uint32_t index, int signed_index)
+                                   uint32_t index, int signed_index, int address32)
 {
     unsigned bits = width == 2 ? 32u : 16u;
     unsigned bytes = width == 2 ? 4u : 2u;
@@ -48,18 +48,19 @@ static   int b86_rm2_bitpos(B86RM1EA *ea, unsigned width,
         int64_t ix = width == 2 ? (int32_t)index : (int16_t)index;
         shift = ix / (int64_t)bits;
         if (ix < 0 && ix % bits) --shift;
-    } else shift = (uint8_t)index / bits;
+    } else shift = 0; /* imm8 high bits ignored by 386 hardware */
     ea->off = (uint32_t)(ea->off + shift * bytes);
+    if (!address32) ea->off &= 0xFFFFu; /* 16-bit EA wraps */
     return b86_rm1_memok(ea, bytes);
 }
 
 static   int b86_rm2_bit(B86Cpu *c, const B86RM1EA *arg,
                                unsigned width, unsigned operation,
-                               uint32_t index, int signed_index)
+                               uint32_t index, int signed_index, int address32)
 {
     B86RM1EA ea = *arg;
     unsigned n = width == 2 ? 32u : 16u;
-    if (!b86_rm2_bitpos(&ea, width, index, signed_index)) return 0;
+    if (!b86_rm2_bitpos(&ea, width, index, signed_index, address32)) return 0;
     uint32_t mask = 1u << (index & (n - 1u));
     uint32_t old = b86_rm1_rmget(c, &ea, width);
     uint32_t changed = old;
@@ -108,6 +109,7 @@ static   int b86_rm2_double_shift(B86Cpu *c, const B86RM1EA *ea,
     return 1;
 }
 
+/* BB_386_STAGE5C3B_V1: preflighted real-mode data memory faults. */
 static   int b86_rm2_0f(St *s, int operand32, int address32)
 {
     B86Cpu *c = s->c;
@@ -122,7 +124,8 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
         if (cond(c, op & 15u)) {
             uint32_t target = (uint32_t)s->ip + (uint32_t)delta;
             /* Real-mode CS has a 64-KiB default limit in this milestone. */
-            if (operand32 && target > 0xFFFFu) goto unsupported;
+            if (operand32 && target > 0xFFFFu)
+                return b86_rm5c2_fault(s, 13u);
             s->ip = (uint16_t)target;
         }
         goto done;
@@ -130,17 +133,20 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
 
     if (op >= 0x90 && op <= 0x9F) {                 /* SETcc r/m8 */
         form = b86_rm2_operand(s, address32, &ea);
-        if (!form && !b86_rm1_memok(&ea, 1)) goto unsupported;
+        if (!form && !b86_rm1_memok(&ea, 1))
+            return b86_rm5c2_fault(s, ea.seg == B86_SS ? 12u : 13u);
         b86_rm1_rmput(c, &ea, 0, cond(c, op & 15u) ? 1u : 0u);
         goto done;
     }
 
     if (op == 0xB6 || op == 0xB7 || op == 0xBE || op == 0xBF) { /* MOVZX/SX */
         unsigned sw = (op & 1) ? 1u : 0u;
-        /* MOVSX/Zx must widen. r16 <- r/m16 is not an encoding. */
-        if (sw == 1u && width == 1u) goto unsupported;
+        /* 80386EX SST: 0F B7/BF with 16-bit operand size execute as
+           same-width moves. Destination remains 16-bit; upper half
+           of the 32-bit register is preserved by regput(). */
         form = b86_rm2_operand(s, address32, &ea);
-        if (!form && !b86_rm1_memok(&ea, 1u << sw)) goto unsupported;
+        if (!form && !b86_rm1_memok(&ea, 1u << sw))
+            return b86_rm5c2_fault(s, ea.seg == B86_SS ? 12u : 13u);
         src = b86_rm1_rmget(c, &ea, sw);
         if (op == 0xBE) src = (uint32_t)(int32_t)(int8_t)src;
         if (op == 0xBF) src = (uint32_t)(int32_t)(int16_t)src;
@@ -150,7 +156,8 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
 
     if (op == 0xAF) {                              /* IMUL r16/32, r/m */
         form = b86_rm2_operand(s, address32, &ea);
-        if (!form && !b86_rm1_memok(&ea, 1u << width)) goto unsupported;
+        if (!form && !b86_rm1_memok(&ea, 1u << width))
+            return b86_rm5c2_fault(s, ea.seg == B86_SS ? 12u : 13u);
         src = b86_rm1_rmget(c, &ea, width);
         dst = b86_rm1_regget(c, ea.reg, width);
         int64_t prod;
@@ -173,7 +180,8 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
 
     if (op == 0xBC || op == 0xBD) {                 /* BSF / BSR */
         form = b86_rm2_operand(s, address32, &ea);
-        if (!form && !b86_rm1_memok(&ea, 1u << width)) goto unsupported;
+        if (!form && !b86_rm1_memok(&ea, 1u << width))
+            return b86_rm5c2_fault(s, ea.seg == B86_SS ? 12u : 13u);
         src = b86_rm1_rmget(c, &ea, width);
         if (!src) { c->flags |= B86_ZF; goto done; }
         c->flags &= ~(uint32_t)B86_ZF;
@@ -197,7 +205,7 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
             index = b86_rm1_regget(c, ea.reg, width);
             signed_index = 1;
         }
-        if (!b86_rm2_bit(c, &ea, width, action, index, signed_index)) goto unsupported;
+        if (!b86_rm2_bit(c, &ea, width, action, index, signed_index, address32)) goto unsupported;
         goto done;
     }
 
@@ -205,7 +213,8 @@ static   int b86_rm2_0f(St *s, int operand32, int address32)
         form = b86_rm2_operand(s, address32, &ea);
         unsigned count = (op & 1) ? (c->r[B86_CX] & 255u) : f8(s);
         count &= 31u;
-        if (count && form == 0 && !b86_rm1_memok(&ea, 1u << width)) goto unsupported;
+        if (count && form == 0 && !b86_rm1_memok(&ea, 1u << width))
+            return b86_rm5c2_fault(s, ea.seg == B86_SS ? 12u : 13u);
         src = b86_rm1_regget(c, ea.reg, width);
         if (!b86_rm2_double_shift(c, &ea, width, src, op >= 0xAC, count)) goto unsupported;
         goto done;
