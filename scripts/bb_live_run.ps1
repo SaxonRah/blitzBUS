@@ -25,6 +25,23 @@ $state=[ordered]@{result='INCOMPLETE';target=$target;port=$Port;build='SKIPPED';
 $serial=$null
 $quit=$false
 $inputWarning=$false
+# Only the Windows host display receives CRLF; the raw serial log is unchanged.
+# Preserve CR+LF pairs even when COM5 returns them in different ReadExisting chunks.
+$bbDisplayPrevCR=$false
+function Convert-BbConsoleChunk([string]$Chunk) {
+    $out = [System.Text.StringBuilder]::new($Chunk.Length + 16)
+    foreach($c in $Chunk.ToCharArray()) {
+        if($c -eq "`n") {
+            if(-not $script:bbDisplayPrevCR) { [void]$out.Append("`r") }
+            [void]$out.Append("`n")
+            $script:bbDisplayPrevCR=$false
+        } else {
+            [void]$out.Append($c)
+            $script:bbDisplayPrevCR=($c -eq "`r")
+        }
+    }
+    return $out.ToString()
+}
 try {
     $installer=Join-Path $PSScriptRoot 'install_live.py'
     if(!(Test-Path -LiteralPath $installer)){throw "Missing installer: $installer"}
@@ -75,7 +92,7 @@ try {
     while((Get-Date) -lt $deadline){
         $chunk=$serial.ReadExisting()
         if($chunk){
-            Write-Host -NoNewline $chunk
+            Write-Host -NoNewline (Convert-BbConsoleChunk $chunk)
             [System.IO.File]::AppendAllText($log,$chunk)
             $text += $chunk
             if($PhaseProfile){$all += $chunk}

@@ -206,6 +206,71 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
     return false;
 }
 
+/* BB622_BIOS_IRQCHAIN_V1_BEGIN -- boot-time real-mode BIOS timer fallback.
+ * The host maintains BDA ticks. This old-BIOS chain only ACKs the PIC,
+ * invokes the user timer callback and IRETs. No periodic IRQs are enabled.
+ */
+static void BB622_FLASH bb622_bios_irqchain_seed(MdRuntime *rt)
+{
+    MdX86 *c = &rt->cpu;
+    static const uint8_t timer08[] = {
+        0x50u,             /* push ax                 */
+        0xB0u, 0x20u,      /* mov al,20h              */
+        0xE6u, 0x20u,      /* out 20h,al (PIC EOI)    */
+        0x58u,             /* pop ax                  */
+        0xCDu, 0x1Cu,      /* int 1Ch (DOS callback) */
+        0xCFu              /* iret                    */
+    };
+    static const uint8_t timer1c[] = { 0xCFu }; /* iret, default callback */
+    const uint16_t seg = 0xF000u, off08 = 0x0100u, off1c = 0x0120u;
+    uint16_t old08off = md_x86_read16(c, 0u, 0x0020u);
+    uint16_t old08seg = md_x86_read16(c, 0u, 0x0022u);
+    uint16_t old1coff = md_x86_read16(c, 0u, 0x0070u);
+    uint16_t old1cseg = md_x86_read16(c, 0u, 0x0072u);
+    int need08 = !(old08off | old08seg);
+    int need1c = !(old1coff | old1cseg);
+    unsigned i;
+    /* Never replace a valid IVT target or overwrite occupied BIOS space. */
+    if (need08) for (i = 0u; i < sizeof timer08; ++i) {
+        uint8_t v = md_x86_read8(c, seg, (uint16_t)(off08 + i));
+        if (v != 0u && v != timer08[i]) goto occupied;
+    }
+    if (need1c) for (i = 0u; i < sizeof timer1c; ++i) {
+        uint8_t v = md_x86_read8(c, seg, (uint16_t)(off1c + i));
+        if (v != 0u && v != timer1c[i]) goto occupied;
+    }
+    if (need08) {
+        for (i = 0u; i < sizeof timer08; ++i)
+            md_x86_write8(c, seg, (uint16_t)(off08 + i), timer08[i]);
+        md_x86_write16(c, 0u, 0x0020u, off08);
+        md_x86_write16(c, 0u, 0x0022u, seg);
+        md_runtime_mark_code_range(rt, seg, off08, (uint32_t)sizeof timer08);
+    }
+    if (need1c) {
+        for (i = 0u; i < sizeof timer1c; ++i)
+            md_x86_write8(c, seg, (uint16_t)(off1c + i), timer1c[i]);
+        md_x86_write16(c, 0u, 0x0070u, off1c);
+        md_x86_write16(c, 0u, 0x0072u, seg);
+        md_runtime_mark_code_range(rt, seg, off1c, (uint32_t)sizeof timer1c);
+    }
+    printf("[bb622-biosirq] old08=%04X:%04X old1c=%04X:%04X seeded08=%u seeded1c=%u new08=%04X:%04X new1c=%04X:%04X (host-BDA-tick)\n",
+           (unsigned)old08seg, (unsigned)old08off,
+           (unsigned)old1cseg, (unsigned)old1coff,
+           (unsigned)need08, (unsigned)need1c,
+           (unsigned)md_x86_read16(c, 0u, 0x0022u),
+           (unsigned)md_x86_read16(c, 0u, 0x0020u),
+           (unsigned)md_x86_read16(c, 0u, 0x0072u),
+           (unsigned)md_x86_read16(c, 0u, 0x0070u));
+    fflush(stdout);
+    return;
+occupied:
+    printf("[bb622-biosirq] REFUSE occupied guest BIOS stub region; vectors left unchanged old08=%04X:%04X old1c=%04X:%04X\n",
+           (unsigned)old08seg, (unsigned)old08off,
+           (unsigned)old1cseg, (unsigned)old1coff);
+    fflush(stdout);
+}
+/* BB622_BIOS_IRQCHAIN_V1_END */
+
 static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
 {
     MdX86 *c = &rt->cpu;
@@ -236,6 +301,7 @@ static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
     printf("[bb622-diag] 16 after.copy_boot_sector\n"); fflush(stdout);
     /* Preserve DOS2 kernel bytes for rollback; establish only BIOS BDA/IVT
        fields the genuine bootstrap immediately needs. */
+    bb622_bios_irqchain_seed(rt); /* BB622_BIOS_IRQCHAIN_V1: seed before DOS captures old INT08 */
     md_x86_write16(c, 0x0000u, 0x0078u, 0x0100u); /* INT1E floppy table */
     md_x86_write16(c, 0x0000u, 0x007Au, 0x0050u);
     for (i = 0; i < sizeof dpt; ++i) md_x86_write8(c, 0x0050u, (uint16_t)(0x0100u + i), dpt[i]);

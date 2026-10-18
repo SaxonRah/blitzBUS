@@ -31,9 +31,9 @@ def main():
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
     cpu=os.environ.get("BB_CPU","8086")       # v63: 8086 (exact), 186; v64: 286 (real mode)
-    if cpu not in ("8086","186","286"):
-        raise SystemExit("BB_CPU must be 8086, 186 or 286")
-    cpu_model={"8086":0,"186":1,"286":2}[cpu]
+    if cpu not in ("8086","186","286","386"):
+        raise SystemExit("BB_CPU must be 8086, 186, 286 or 386")
+    cpu_model={"8086":0,"186":1,"286":2,"386":3}[cpu]
     paged=os.environ.get("BB_PAGED","1")
     if paged not in ("0","1"):
         raise SystemExit("BB_PAGED must be 0 or 1 (v40 SRAM-backed guest pages)")
