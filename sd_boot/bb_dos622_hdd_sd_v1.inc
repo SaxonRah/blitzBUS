@@ -4,7 +4,7 @@
  */
 #ifndef BB_DOS622_HDD_SD_V1
 #define BB_DOS622_HDD_SD_V1
-#define BB622_HD_SECTORS 65520u
+#define BB622_HD_SECTORS 258048u
 #define BB622_HD_BYTES ((FSIZE_t)BB622_HD_SECTORS * 512u)
 static FIL bb622_hd_fil;
 static bool bb622_hd_open;
@@ -31,7 +31,7 @@ static void bb622_hd_mount(const char *drive)
     if(fr!=FR_OK||got!=512u||mbr[510]!=0x55u||mbr[511]!=0xAAu||
        mbr[446]!=0x80u||mbr[450]!=0x06u||
        mbr[454]!=63u||mbr[455]!=0u||mbr[456]!=0u||mbr[457]!=0u||
-       mbr[458]!=0xB1u||mbr[459]!=0xFFu||mbr[460]!=0u||mbr[461]!=0u){
+       mbr[458]!=0xC1u||mbr[459]!=0xEFu||mbr[460]!=0x03u||mbr[461]!=0u){
         printf("[bb622-hdd] rejected: MBR partition mismatch\n");
         (void)f_close(&bb622_hd_fil);return;
     }
@@ -40,13 +40,15 @@ static void bb622_hd_mount(const char *drive)
     if(fr==FR_OK)fr=f_read(&bb622_hd_fil,bpb,512u,&got);
     if(fr!=FR_OK||got!=512u||bpb[510]!=0x55u||bpb[511]!=0xAAu||
        bpb[11]!=0u||bpb[12]!=2u||bpb[13]!=4u||bpb[16]!=2u||
+       bpb[19]!=0u||bpb[20]!=0u||bpb[22]!=0xFCu||bpb[23]!=0u||
+       bpb[32]!=0xC1u||bpb[33]!=0xEFu||bpb[34]!=0x03u||bpb[35]!=0u||
        bpb[28]!=63u||bpb[29]!=0u||bpb[30]!=0u||bpb[31]!=0u){
         printf("[bb622-hdd] rejected: FAT16 BPB mismatch\n");
         (void)f_close(&bb622_hd_fil);return;
     }
     bb622_hd_read_n=bb622_hd_write_n=bb622_hd_error_n=0;
     bb622_hd_open=true;
-    printf("[bb622-hdd] BIOS 80h mounted RW 65x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
+    printf("[bb622-hdd] BIOS 80h mounted RW 256x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
 }
 
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
