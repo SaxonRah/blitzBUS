@@ -30,6 +30,12 @@ def main():
     hot=os.environ.get("BB_HOT_THRESHOLD","32")   # 32
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
+    # B86_386_NATIVE_T1_V1: experimental 386 real-mode JIT, OFF by default.
+    native386=os.environ.get('BB_386_NATIVE_T1','0')
+    if native386 not in ('0','1'):
+        raise SystemExit('BB_386_NATIVE_T1 must be 0 or 1')
+    if native386=='1' and os.environ.get('BB_CPU','8086')!='386':
+        raise SystemExit('BB_386_NATIVE_T1=1 requires BB_CPU=386')
     cpu=os.environ.get("BB_CPU","8086")       # v63: 8086 (exact), 186; v64: 286 (real mode)
     if cpu not in ("8086","186","286","386"):
         raise SystemExit("BB_CPU must be 8086, 186, 286 or 386")
@@ -245,7 +251,7 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/src/system"
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
-    B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10 B86_EVICT_CHUNK={eviction_chunk}u B86_EVICT_ROOM={eviction_room}u
+    B86_386_NATIVE_T1={native386} B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10 B86_EVICT_CHUNK={eviction_chunk}u B86_EVICT_ROOM={eviction_room}u
     BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u BB_NO_CHAIN={no_chain} BB_CHAIN_PROFILE=1
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
