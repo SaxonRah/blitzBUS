@@ -668,6 +668,10 @@ static void bb_v33_jit_line(void) {
         (unsigned long long)(s->evictions-prev.evictions),(unsigned long long)(s->evicted_blocks-prev.evicted_blocks),
         (unsigned long long)(s->unchains-prev.unchains),
         (unsigned long long)(s->limit_retries-prev.limit_retries));
+    if (C.model >= B86_CPU_386) {          /* blitz86 r56: 386 forms still stepped by the interpreter */
+        char top[256];
+        if (b86_jit_386_top(J, top, (int)sizeof top, 12) > 0) printf("[bb-386-steps] %s\n", top);
+    }
 #if defined(BB_MISS_PROFILE) && BB_MISS_PROFILE
     /* v59: where the cache misses come from (blitz86 -DB86_MPROF). "code" is
        generated code plus the dispatcher: the native window minus the
@@ -1865,7 +1869,7 @@ static int start(MdRuntime *rt)
     printf("[bb622-diag] 06 before.cpu_model\n"); fflush(stdout);
     C.model = BB_CPU_MODEL;            /* v63: 0 = 8086 (exact), 1 = 80186 instruction set */
     #if BB_CPU_MODEL == 3
-    printf("[bb-v63-cpu] blitz86 CPU model 80386 (real mode, interpreter)\n");
+    printf("[bb-v63-cpu] blitz86 CPU model 80386 (real mode JIT; protected mode interpreter)\n");
     #else
     printf("[bb-v63-cpu] blitz86 CPU model %s\n", C.model >= B86_CPU_386 ? "80386 (real mode)" : C.model >= B86_CPU_286 ? "80286 (real mode)" : C.model ? "80186" : "8086");
     #endif /* B86_LIVE386_ENABLE_V3 */

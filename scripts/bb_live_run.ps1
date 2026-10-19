@@ -3,12 +3,14 @@ param(
     [string]$MicroDOS='C:\microDOS',
     [string]$Blitz86='C:\blitz86_v2',
     [string]$Port='COM5',
-    [int]$Seconds=180,
+    [int]$Seconds=0,
     [switch]$NoBuild,
     [switch]$NoFlash,
     [switch]$NoInput,
     [switch]$AutoTests,
-    [switch]$PhaseProfile
+    [switch]$PhaseProfile,
+    [ValidateSet('Screen','Events','Raw')]
+    [string]$ConsoleView='Screen'
 )
 $ErrorActionPreference='Stop'
 $root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -17,31 +19,24 @@ $Blitz86=(Resolve-Path -LiteralPath $Blitz86).Path
 $target='blitzbus_pico_b86_dos'
 $firmware=Join-Path $MicroDOS "build-pico\out\$target.uf2"
 $logs=Join-Path $root 'logs'
+$bbPicToggleRequest=Join-Path $logs 'bb622-picprobe.request'
+$bb622IrqTrialRequest=Join-Path $logs 'bb622-irqtrial.request'
+$bb622SwapRequest=Join-Path $logs 'bb622-swap.request'
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 $stamp=Get-Date -Format 'yyyyMMdd-HHmmss'
 $log=Join-Path $logs "bb-live-$stamp-console.txt"
 $report=Join-Path $logs "bb-live-$stamp-report.json"
 $state=[ordered]@{result='INCOMPLETE';target=$target;port=$Port;build='SKIPPED';flash='SKIPPED';cdc='NOT_OPENED';lcd='NOT_OBSERVED';dos2test='NOT_RUN';mdstress='NOT_RUN';backend='NOT_VERIFIED';retired=[uint64]0;blocks=[uint64]0;ready=$false;transcript=$log;error=''}
+# BB_DOS622_COLOR_CELLS_V1 : host display only; original raw CDC log is preserved.
+if ($ConsoleView -ne 'Raw') { . (Join-Path $PSScriptRoot 'bb622_descent_color_host.ps1') }
 $serial=$null
 $quit=$false
+$bb622SwapStage=0
+$bb622SwapDrive=""
+$bbDesStage=0
+$bbDesDrive='B'
+$bbDesDigit=''
 $inputWarning=$false
-# Only the Windows host display receives CRLF; the raw serial log is unchanged.
-# Preserve CR+LF pairs even when COM5 returns them in different ReadExisting chunks.
-$bbDisplayPrevCR=$false
-function Convert-BbConsoleChunk([string]$Chunk) {
-    $out = [System.Text.StringBuilder]::new($Chunk.Length + 16)
-    foreach($c in $Chunk.ToCharArray()) {
-        if($c -eq "`n") {
-            if(-not $script:bbDisplayPrevCR) { [void]$out.Append("`r") }
-            [void]$out.Append("`n")
-            $script:bbDisplayPrevCR=$false
-        } else {
-            [void]$out.Append($c)
-            $script:bbDisplayPrevCR=($c -eq "`r")
-        }
-    }
-    return $out.ToString()
-}
 try {
     $installer=Join-Path $PSScriptRoot 'install_live.py'
     if(!(Test-Path -LiteralPath $installer)){throw "Missing installer: $installer"}
@@ -89,10 +84,11 @@ try {
     $all='';$phase=0;$phaseState='';$doneTarget=0;$deltaTarget=0;$phaseDoneAt=$null;$phases=@()
     $statsSentAt=$null
     $deadline=(Get-Date).AddSeconds($Seconds)
-    while((Get-Date) -lt $deadline){
+    while($Seconds -le 0 -or (Get-Date) -lt $deadline){
         $chunk=$serial.ReadExisting()
         if($chunk){
-            Write-Host -NoNewline (Convert-BbConsoleChunk $chunk)
+            if ($ConsoleView -eq 'Raw') { Write-Host -NoNewline $chunk }
+            else { Write-BbDos622ColorConsoleChunk $chunk $ConsoleView }
             [System.IO.File]::AppendAllText($log,$chunk)
             $text += $chunk
             if($PhaseProfile){$all += $chunk}
@@ -134,9 +130,102 @@ try {
             try {
                 if([Console]::KeyAvailable){
                     $k=[Console]::ReadKey($true)
+                    # BB622_DESCENT_SWAP_V1: Alt+G / Ctrl+G compact picker.
+                    # Defaults to B: for Descent, 0 ejects, Enter commits.
+                    # A/B can optionally be typed before the disk number.
+                    $bbDesAlt = ($k.Key -eq [ConsoleKey]::G -and
+                        (($k.Modifiers -band [ConsoleModifiers]::Alt) -ne 0))
+                    $bbDesCtrl = ([int][char]$k.KeyChar -eq 7)
+                    if ($bbDesAlt -or $bbDesCtrl) {
+                        $bbDesStage=1; $bbDesDrive='B'; $bbDesDigit=''
+                        try { [Console]::Title='Alt+G floppy | B: disk 0..5 (0=eject), A/B drive, Enter confirms' } catch {}
+                        continue
+                    }
+                    if ($bbDesStage -ne 0) {
+                        if ($k.Key -eq [ConsoleKey]::Escape) {
+                            $bbDesStage=0; $bbDesDigit=''
+                            try { [Console]::Title='Floppy choice cancelled' } catch {}
+                            continue
+                        }
+                        if ($k.KeyChar -eq 'a' -or $k.KeyChar -eq 'A' -or
+                            $k.KeyChar -eq 'b' -or $k.KeyChar -eq 'B') {
+                            $bbDesDrive=([string]$k.KeyChar).ToUpperInvariant();$bbDesDigit=''
+                            try { [Console]::Title="Alt+G floppy | $($bbDesDrive): choose disk (0=eject), then Enter" } catch {}
+                            continue
+                        }
+                        if ($k.KeyChar -ge '0' -and $k.KeyChar -le '9') {
+                            $wanted=[int]([string]$k.KeyChar)
+                            if ($bbDesDrive -eq 'B' -and $wanted -gt 5) {
+                                $bbDesDigit=''
+                                try { [Console]::Title='B: only disk 0 (eject) or disks 1..5; retry' } catch {}
+                            } else {
+                                $bbDesDigit=[string]$k.KeyChar
+                                try { [Console]::Title="Alt+G floppy | $($bbDesDrive):$bbDesDigit ready; ENTER to apply (Esc cancels)" } catch {}
+                            }
+                            continue
+                        }
+                        if ($k.Key -eq [ConsoleKey]::Enter) {
+                            if ($bbDesDigit -ne '') {
+                                $bbDesCode=$bbDesDrive+$bbDesDigit
+                                $serial.Write(([string][char]0x1C)+$bbDesCode)
+                                [System.IO.File]::AppendAllText($log,"[bb622-altg] SENT $bbDesCode waiting for firmware response`n")
+                                try { [Console]::Title="blitzBUS $bbDesCode sent | wait for [bb622-swap] OK before DOS Enter" } catch {}
+                                $bbDesStage=0;$bbDesDigit=''
+                            }
+                            continue
+                        }
+                        # While selecting a disk, don't accidentally type into DOS.
+                        continue
+                    }
+                    # BB_DOS622_SWAP_LCD_V2: F9 -> drive A/B -> disk number.
+                    # Never pass menu selection to the DOS keyboard.
+                    if($k.Key -eq [ConsoleKey]::F9 -or $k.KeyChar -eq [char]7 -or ($k.Key -eq [ConsoleKey]::G -and (($k.Modifiers -band [ConsoleModifiers]::Control) -ne 0))){
+                        $bb622SwapStage=1
+                        [Console]::Title='blitzBUS floppy swap | F9: choose A or B (Esc cancels)'
+                        continue
+                    }
+                    if($bb622SwapStage -eq 1){
+                        if($k.Key -eq [ConsoleKey]::Escape){
+                            $bb622SwapStage=0;[Console]::Title='blitzBUS DOS 6.22 | floppy selection canceled'
+                        } elseif($k.KeyChar -eq 'a' -or $k.KeyChar -eq 'A' -or
+                                 $k.KeyChar -eq 'b' -or $k.KeyChar -eq 'B'){
+                            $bb622SwapDrive=([string]$k.KeyChar).ToUpperInvariant()
+                            $bb622SwapStage=2
+                            [Console]::Title="blitzBUS floppy swap | $($bb622SwapDrive): press disk number 1..9 (Esc cancels)"
+                        }
+                        continue
+                    }
+                    if($bb622SwapStage -eq 2){
+                        if($k.Key -eq [ConsoleKey]::Escape){
+                            [Console]::Title='blitzBUS DOS 6.22 | floppy selection canceled'
+                        } elseif($k.KeyChar -ge '0' -and $k.KeyChar -le '9'){
+                            $number=[string]$k.KeyChar # BB_DOS622_BOOT_EJECT_V1: disk 0 eject
+                            if($bb622SwapDrive -eq 'B' -and [int]$number -gt 5){
+                                [Console]::Title='blitzBUS B: supports DESCENT1..5.IMG only; press F9 to retry'
+                            }else{
+                                $serial.Write(([string][char]0x1C)+$bb622SwapDrive+$number)
+                                [Console]::Title="blitzBUS | sent $($bb622SwapDrive):$number; check ACK then press Enter in DOS"
+                            }
+                        }
+                        $bb622SwapStage=0
+                        continue
+                    }
                     $ch=$k.KeyChar
                     if([int][char]$ch -eq 24){$quit=$true;break}
-                    if($k.Key -eq [ConsoleKey]::Enter){
+                    $bb622SpecialKey = switch ([string]$k.Key) {
+                        'F1' {'OP'} 'F2' {'OQ'} 'F3' {'OR'} 'F4' {'OS'}
+                        'F5' {'[15~'} 'F6' {'[17~'} 'F7' {'[18~'} 'F8' {'[19~'}
+                        'F9' {'[20~'} 'F10' {'[21~'} 'F11' {'[23~'} 'F12' {'[24~'}
+                        'UpArrow' {'[A'} 'DownArrow' {'[B'}
+                        'RightArrow' {'[C'} 'LeftArrow' {'[D'}
+                        'Home' {'[H'} 'End' {'[F'}
+                        'Insert' {'[2~'} 'Delete' {'[3~'}
+                        'PageUp' {'[5~'} 'PageDown' {'[6~'}
+                        default {''}
+                    }
+                    if ($bb622SpecialKey) {
+                        $serial.Write(([string][char]27) + $bb622SpecialKey)
+                    } elseif($k.Key -eq [ConsoleKey]::Enter){
                         # DOS/COMMAND.COM provides its own CRLF echo.
                         $serial.Write("`r")
                     } elseif($k.Key -eq [ConsoleKey]::Backspace){
@@ -178,6 +267,62 @@ try {
         } elseif($AutoTests -and $statsSent -and $state.backend -eq 'blitz86-thumb2'){
             if($state.retired -gt 0 -and $state.blocks -gt 0 -and $state.ready){break}
             if(((Get-Date)-$statsSentAt).TotalSeconds -gt 5){break}
+        }
+        if ($ConsoleView -eq 'Screen') { Show-BbDos622ColorFrame }
+        # BB622_SWAP_CONTROLS_V1 - out-of-band requests for consoles where F9 is reserved.
+        # The runner exclusively owns COM5; callers never open the serial port.
+        if ([System.IO.File]::Exists($bb622SwapRequest)) {
+            try {
+                $bb622Raw = [System.IO.File]::ReadAllText($bb622SwapRequest).Trim().ToUpperInvariant()
+                [System.IO.File]::Delete($bb622SwapRequest)
+                if ($bb622Raw -match '^[AB][0-9]$') {
+                    $bb622DiskDrive = $bb622Raw.Substring(0,1)
+                    $bb622DiskNum = $bb622Raw.Substring(1,1)
+                    if ($bb622DiskDrive -eq 'B' -and [int]$bb622DiskNum -gt 5) {
+                        [Console]::Title = 'blitzBUS disk request rejected: B supports disks 1..5'
+                    } else {
+                        $serial.Write(([string][char]0x1C)+$bb622DiskDrive+$bb622DiskNum)
+                        [System.IO.File]::AppendAllText($log,"[bb622-hostswap] SENT $($bb622DiskDrive):$bb622DiskNum awaiting firmware ACK`n")
+                        [Console]::Title="blitzBUS swap $($bb622DiskDrive):$bb622DiskNum submitted; wait for OK then press Enter"
+                    }
+                } else {
+                    [Console]::Title='blitzBUS disk request invalid: expected A2 or B3'
+                }
+            } catch {
+                [Console]::Title='blitzBUS disk request failed: '+[string]$_
+            }
+        }
+        # BB622_PIC_HOST_CONTROL_V1: service independent PIC-probe toggle request.
+        # Exactly one requester is allowed; firmware sends [bb622-picprobe] ACK.
+        if ([System.IO.File]::Exists($bbPicToggleRequest)) {
+            try {
+                $bbPicText=[System.IO.File]::ReadAllText($bbPicToggleRequest).Trim().ToUpperInvariant()
+                if ($bbPicText -eq 'Y') {
+                    [System.IO.File]::Delete($bbPicToggleRequest)
+                    $serial.Write([string][char]0x19)
+                    [System.IO.File]::AppendAllText($log,"[bb622-piccontrol] SENT Ctrl+Y 0x19 awaiting firmware ACK`n")
+                } else {
+                    [System.IO.File]::Delete($bbPicToggleRequest)
+                    [System.IO.File]::AppendAllText($log,"[bb622-piccontrol] REJECT invalid request`n")
+                }
+            } catch {
+                [System.IO.File]::AppendAllText($log,"[bb622-piccontrol] ERROR $($_.Exception.Message)`n")
+            }
+        }
+        # BB622_IRQ0_TRIAL_V1: one-shot request from second window.
+        if ([System.IO.File]::Exists($bb622IrqTrialRequest)) {
+            try {
+                $bb622IrqText=[System.IO.File]::ReadAllText($bb622IrqTrialRequest).Trim()
+                [System.IO.File]::Delete($bb622IrqTrialRequest)
+                if ($bb622IrqText -ceq 'ARM') {
+                    $serial.Write([string][char]0x15)
+                    [System.IO.File]::AppendAllText($log,"[bb622-irqtrial-host] SENT Ctrl+U 0x15`n")
+                } else {
+                    [System.IO.File]::AppendAllText($log,"[bb622-irqtrial-host] REJECT request`n")
+                }
+            } catch {
+                [System.IO.File]::AppendAllText($log,"[bb622-irqtrial-host] ERROR $($_.Exception.Message)`n")
+            }
         }
         Start-Sleep -Milliseconds 15
     }
