@@ -732,7 +732,12 @@ static void bb_v24_report(void) {
     printf("[bb-v51-stack] core0 peak=%lu of %lu bytes\n", (unsigned long)bb_v51_stack_peak(),
            (unsigned long)((uintptr_t)__StackTop - (uintptr_t)__StackBottom));
 #endif
-    if(!R||!bb_video_seen)return;
+    if(!R||!bb_video_seen){
+        /* blitz86 r57: DOS 6.22 text mode never sets bb_video_seen; still
+           show the JIT line ([bb-jit] + [bb-386-steps]) on Ctrl+]. */
+        if(R&&J)bb_v33_jit_line();
+        return;
+    }
     uint64_t elapsed=bb_now_us()-bb_v24_start_us;
     printf("[bb-v24] PROFILE wall-ms=%llu jit-calls=%llu jit-zero=%llu zero-trap=%llu jit-insns=%llu jit-ms=%llu interp-calls=%llu interp-insns=%llu interp-ms=%llu lcd-tick-calls=%llu lcd-tick-ms=%llu hash-calls=%llu hash-ms=%llu bda-tick-start=%lu bda-tick-now=%lu\n",
        (unsigned long long)(elapsed/1000u),(unsigned long long)bb_v24_jit_calls,
