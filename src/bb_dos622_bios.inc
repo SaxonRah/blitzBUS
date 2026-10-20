@@ -156,6 +156,39 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
 #include "bb_dos622_printer17.inc"
 /* BB_DOS622_RTC1A_V1 */
 #include "bb_dos622_rtc1a.inc"
+/* BB_GUEST_RAM_V1: extended memory services. */
+static unsigned bb622_ext_logged;
+static uint32_t BB622_FLASH bb622_ext_kib(void)
+{
+    uint32_t kib = B86_RAM_BYTES > 0x100000u ? (uint32_t)((B86_RAM_BYTES - 0x100000u) / 1024u) : 0u;
+    return kib > 0xFFFFu ? 0xFFFFu : kib;
+}
+/* INT 15h AH=87h: move CX words between the 24-bit bases of descriptors 2
+ * (source) and 3 (destination) in the table at ES:SI. Goes through
+ * b86_host (honours SRAM-mapped low pages) and invalidates translated code
+ * in the destination. */
+static bool BB622_FLASH bb622_int15_move(MdRuntime *rt)
+{
+    MdX86 *c = &rt->cpu;
+    uint32_t gdt = (((uint32_t)c->es << 4) + (uint16_t)c->r[MD_X86_SI]) & 0xFFFFFu;
+    uint32_t n = (uint32_t)(uint16_t)c->r[MD_X86_CX] * 2u, src, dst, i;
+    const uint8_t *g;
+    if (gdt + 0x20u > B86_MEM_BYTES || n > 0x10000u) goto fail;
+    g = b86_host(&C, gdt);
+    src = (uint32_t)g[0x12] | (uint32_t)g[0x13] << 8 | (uint32_t)g[0x14] << 16 | (uint32_t)g[0x17] << 24;
+    dst = (uint32_t)g[0x1A] | (uint32_t)g[0x1B] << 8 | (uint32_t)g[0x1C] << 16 | (uint32_t)g[0x1F] << 24;
+    if ((uint64_t)src + n > B86_RAM_BYTES || (uint64_t)dst + n > B86_RAM_BYTES) goto fail;
+    for (i = 0; i < n; ++i) *b86_host(&C, dst + i) = *b86_host(&C, src + i);
+    if (C.jit && n && dst < B86_MEM_BYTES)
+        b86_jit_invalidate(C.jit, dst, (dst + n > B86_MEM_BYTES) ? B86_MEM_BYTES - dst : n);
+    c->r[MD_X86_AX] &= 0x00FFu;
+    md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) & ~MD_X86_FLAG_CF));
+    return true;
+fail:
+    c->r[MD_X86_AX] = (uint16_t)((c->r[MD_X86_AX] & 0x00FFu) | 0x0100u);   /* parity error / bad table */
+    md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) | MD_X86_FLAG_CF));
+    return true;
+}
 /* BB_DOS622_STALL_WATCH_V1 */
 static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void *user)
 {
@@ -168,11 +201,23 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
     case 0x11u: c->r[MD_X86_AX] = 0x0061u; return true; /* BB_DOS622_BOOT_EJECT_V1: two physical drives */ /* CGA, one/two floppies */
     case 0x12u: c->r[MD_X86_AX] = 640u; return true;
     case 0x15u:
+        /* BB_GUEST_RAM_V1: extended memory = guest RAM above 1 MiB. */
         if ((c->r[MD_X86_AX] >> 8) == 0x88u) {
-            c->r[MD_X86_AX] = 0u; /* no extended RAM exposed yet */
+            c->r[MD_X86_AX] = (uint16_t)bb622_ext_kib();
+            md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) & ~MD_X86_FLAG_CF));
+            if (bb622_ext_logged++ < 2u) {
+                printf("[bb622-xms] INT15 88h -> %u KiB extended\n", (unsigned)bb622_ext_kib());
+                fflush(stdout);
+            }
+            return true;
+        }
+        if ((c->r[MD_X86_AX] & 0xFFFFu) == 0xE801u) {         /* <16 MiB in KiB, >16 MiB in 64 KiB */
+            c->r[MD_X86_AX] = c->r[MD_X86_CX] = (uint16_t)bb622_ext_kib();
+            c->r[MD_X86_BX] = c->r[MD_X86_DX] = 0u;
             md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) & ~MD_X86_FLAG_CF));
             return true;
         }
+        if ((c->r[MD_X86_AX] >> 8) == 0x87u) return bb622_int15_move(rt);
         c->r[MD_X86_AX] = (uint16_t)(0x86u << 8);
         md_x86_set_flags(c, (uint16_t)(md_x86_flags(c) | MD_X86_FLAG_CF));
         return true;

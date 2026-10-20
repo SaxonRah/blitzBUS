@@ -90,7 +90,7 @@ static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(MD_GUEST
     g_guest[MD_GUEST_BYTES];
 #else
 static uint8_t __uninitialized_psram("md_guest") __attribute__((aligned(0x200000)))
-    g_guest_raw[0xA0000u + MD_GUEST_BYTES];
+    g_guest_raw[0xA0000u + B86_RAM_BYTES];
 #define g_guest (g_guest_raw + 0xA0000u)
 #endif
 #endif
