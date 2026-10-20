@@ -198,6 +198,10 @@ static bool slice_cb(struct repeating_timer *t) { (void)t; C.irq |= 1u; return t
 B86_HOT static void to_b86(void)
 {
     MdX86 *m = &R->cpu;
+    /* BB386_PM_STATE_V1: in protected mode microDOS's CS:IP, segments and
+       flags are a stale 16-bit view of selectors and a 32-bit EIP (copying
+       them back truncated EIP to 16 bits every slice), so nothing comes back. */
+    if (C.model >= B86_CPU_386 && (C.msw & 1u)) return;
     /* BB386_GPR_HIGH_V1: retain 386 high halves across MdX86 slice handoff. */
     for (unsigned i = 0; i < 8u; ++i) {
         if (C.model >= B86_CPU_386) C.r[i] = (C.r[i] & 0xFFFF0000u) | m->r[i];
@@ -2117,6 +2121,86 @@ static void bb_time_freeze(uint64_t us)
     for (unsigned i = 0; i < 3u; ++i) bb_pit.c[i].epoch_us += us;   /* PIT counters */
     bb_irq36.anchor_us = bb_pit.c[0].epoch_us;   /* keep IRQ0's period count */
 }
+/* BB386_PM_STATE_V1: protected-mode bookkeeping and the stop dump. */
+static inline int bb386_pm(void) { return C.model >= B86_CPU_386 && (C.msw & 1u) != 0; }
+static unsigned long bb386_pm_slices;
+static int bb386_pm_was;
+static const char *bb386_rc_name(int rc)
+{
+    switch (rc) {
+    case B86_OK: return "ok"; case B86_HALT: return "halt"; case B86_EXIT: return "exit";
+    case B86_BUDGET: return "budget"; case B86_TRAP: return "trap";
+    case B86_UNSUPPORTED: return "unsupported"; case B86_SHUTDOWN: return "shutdown";
+    default: return "?";
+    }
+}
+static uint32_t bb386_cs_linear(void)
+{
+    if (C.msw & 1u) return C.pm386.seg[B86_CS].base + C.ip;
+    return ((uint32_t)(uint16_t)C.seg[B86_CS] << 4) + (C.ip & 0xFFFFu);
+}
+static void bb386_pm_regs(const char *tag)
+{
+    const B86PM1Cache *s = C.pm386.seg;
+    printf("[bb386-pm] %s cr0=%04X cs=%04X eip=%08lX cs.base=%08lX cs.limit=%08lX cs.acc=%02X cs.flg=%02X\n",
+           tag, (unsigned)C.msw, (unsigned)s[B86_CS].selector, (unsigned long)C.ip,
+           (unsigned long)s[B86_CS].base, (unsigned long)s[B86_CS].limit,
+           (unsigned)s[B86_CS].access, (unsigned)s[B86_CS].flags);
+    printf("[bb386-pm]   eax=%08lX ebx=%08lX ecx=%08lX edx=%08lX esi=%08lX edi=%08lX ebp=%08lX esp=%08lX flags=%04X\n",
+           (unsigned long)C.r[B86_AX], (unsigned long)C.r[B86_BX], (unsigned long)C.r[B86_CX],
+           (unsigned long)C.r[B86_DX], (unsigned long)C.r[B86_SI], (unsigned long)C.r[B86_DI],
+           (unsigned long)C.r[B86_BP], (unsigned long)C.r[B86_SP], (unsigned)b86_get_flags(&C));
+    printf("[bb386-pm]   ss=%04X/%08lX ds=%04X/%08lX es=%04X/%08lX fs=%04X/%08lX gs=%04X/%08lX gdt=%08lX idt=%08lX\n",
+           (unsigned)s[B86_SS].selector, (unsigned long)s[B86_SS].base,
+           (unsigned)s[B86_DS].selector, (unsigned long)s[B86_DS].base,
+           (unsigned)s[B86_ES].selector, (unsigned long)s[B86_ES].base,
+           (unsigned)s[B86_FS].selector, (unsigned long)s[B86_FS].base,
+           (unsigned)s[B86_GS].selector, (unsigned long)s[B86_GS].base,
+           (unsigned long)C.gdt_base, (unsigned long)C.idt_base);
+    uint32_t lin = bb386_cs_linear();
+    printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
+    for (uint32_t j = 0; j < 16u; ++j) {
+        if (lin + j < B86_RAM_BYTES) printf(" %02X", (unsigned)*b86_host(&C, lin + j));
+        else printf(" ??");
+    }
+    printf("\n");
+    fflush(stdout);
+}
+static void bb386_pm_track(int rc)
+{
+    const int pm = bb386_pm();
+    if (pm && !bb386_pm_was) {
+        printf("[bb386-pm] ENTER protected mode (rc=%s retired=%lu)\n", bb386_rc_name(rc), (unsigned long)C.icnt);
+        bb386_pm_regs("enter");
+    } else if (!pm && bb386_pm_was) {
+        printf("[bb386-pm] LEAVE protected mode -> real mode %04X:%04X after %lu PM slices\n",
+               (unsigned)C.seg[B86_CS], (unsigned)(C.ip & 0xFFFFu), bb386_pm_slices);
+        fflush(stdout);
+    }
+    bb386_pm_was = pm;
+    if (pm) {
+        ++bb386_pm_slices;
+        if ((bb386_pm_slices & (bb386_pm_slices - 1u)) == 0u && bb386_pm_slices >= 2u) {
+            char tag[40];
+            snprintf(tag, sizeof tag, "slice=%lu rc=%s", bb386_pm_slices, bb386_rc_name(rc));
+            bb386_pm_regs(tag);
+        }
+    }
+}
+static void bb386_pm_stop(MdRuntime *rt, int rc)
+{
+    char tag[48];
+    snprintf(tag, sizeof tag, "STOP rc=%s retired=0", bb386_rc_name(rc));
+    printf("\n");
+    bb386_pm_regs(tag);
+    printf("[bb386-pm] blitz86 made no progress; the 8086 fallback interpreter is not used for 386 %s\n",
+           (C.msw & 1u) ? "protected mode" : "shutdown");
+    fflush(stdout);
+    rt->fault_linear = bb386_cs_linear();
+    rt->fault_opcode = rt->fault_linear < B86_RAM_BYTES ? *b86_host(&C, rt->fault_linear) : 0u;
+    rt->stop_reason = MD_STOP_FAULT;
+}
+
 B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
@@ -2138,7 +2222,8 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     bb_v25_bios_time();
     bb622_watch_slice(rt);
     /* BB_DOS622_IRQ0_ISOLATION_V1: A/B test native IRQ0 guest-stack delivery */
-    if (rt == R) {
+    /* BB386_PM_STATE_V1: real-mode IVT delivery is wrong while PE=1. */
+    if (rt == R && !bb386_pm()) {
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && BB622_IRQ0_AB_DISABLE
         if (bb_sd_dos622_active()) {
             if(bb622_irq0_trial_armed){
@@ -2266,7 +2351,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (bb_sd_dos622_active()) bb622_post_slice(rt,"SLICE-ENTRY");
 #endif
     if (rt == R && rt->cpu.cs == bios_seg) bb_v40_release("BIOS segment");
-    if (rt != R || rt->cpu.cs == bios_seg) {
+    if (rt != R || (rt->cpu.cs == bios_seg && !bb386_pm())) {   /* BB386_PM_STATE_V1 */
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
                 (unsigned long)bb_interp_skips,(unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip,(unsigned)bios_seg);
@@ -2397,7 +2482,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
                (unsigned long)bb_v10_small_dispatches);
         bb_v7_dump("first-ivt");
     }
-    if (bb_v17_guard(rt,"jit-exit",v13_before_cs,v13_before_ip,
+    if (!bb386_pm() && bb_v17_guard(rt,"jit-exit",v13_before_cs,v13_before_ip,   /* BB386_PM_STATE_V1 */
                      v17_before_ss,v13_before_sp,C.icnt,rc)) {
         rt->instructions += C.icnt; st.retired += C.icnt; ++st.slices;
         return 1;
@@ -2423,6 +2508,15 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (rc == B86_TRAP) ++st.traps;
     if (rc == B86_HALT) { ++st.halts; rt->stop_reason = MD_STOP_HALT; }
     C.irq = 0;
+    /* BB386_PM_STATE_V1: never hand a 386 protected-mode (or shut-down)
+       CPU to microDOS's 8086 interpreter. */
+    bb386_pm_track(rc);
+    if (C.model >= B86_CPU_386 && C.icnt == 0u && rc != B86_HALT &&
+        rt->stop_reason == MD_STOP_NONE && ((C.msw & 1u) || rc == B86_SHUTDOWN)) {
+        if (rc == B86_EXIT || rc == B86_BUDGET) return 1;      /* retry next slice */
+        bb386_pm_stop(rt, rc);
+        return 1;
+    }
     return C.icnt != 0 || rc == B86_HALT || rt->stop_reason != MD_STOP_NONE;
 }
 

@@ -2,11 +2,11 @@
 """BB386_PM_STATE_V1: patch C:\\blitzBUS\\src\\bb_live.c in place.
 
 Fixes three ways blitzBUS corrupted a 386 guest between slices:
-  1. to_b86() copied microDOS's 16-bit register file back into blitz86 at
-     every slice and after every hooked BIOS INT, zeroing the upper halves
-     of EAX..EDI and of EIP. In protected mode it also reloaded CS/SS/DS/ES
-     as real-mode segments. Now: 386 keeps the upper halves; in protected
-     mode nothing comes back from microDOS's stale 16-bit view.
+  1. to_b86() copied microDOS's 16-bit CS:IP, segments and flags back into
+     blitz86 at every slice, truncating EIP to 16 bits and reloading
+     CS/SS/DS/ES as real-mode segments even in protected mode. Now nothing
+     comes back from microDOS's stale 16-bit view while PE=1 (the existing
+     BB386_GPR_HIGH_V1 real-mode behaviour is unchanged).
   2. The between-slice IRQ dispatcher delivered interrupts through the
      real-mode IVT using microDOS's copy of CS:IP/SS:SP. Skipped while PE=1.
   3. A slice that retired 0 instructions fell back to microDOS's 8086
@@ -27,21 +27,16 @@ MARK = "BB386_PM_STATE_V1"
 TO_B86_OLD = """B86_HOT static void to_b86(void)
 {
     MdX86 *m = &R->cpu;
-    for (unsigned i = 0; i < 8u; ++i) C.r[i] = m->r[i];
+    /* BB386_GPR_HIGH_V1: retain 386 high halves across MdX86 slice handoff. */
 """
 TO_B86_NEW = """B86_HOT static void to_b86(void)
 {
     MdX86 *m = &R->cpu;
-    /* BB386_PM_STATE_V1: microDOS mirrors only a 16-bit register file.
-       386 real mode: keep the upper halves of EAX..EDI (a BIOS call on a
-       real 386 leaves them alone). Protected mode: microDOS's CS:IP,
-       segments and flags are a stale 16-bit view of selectors and a
-       32-bit EIP, so nothing comes back. */
-    if (C.model >= B86_CPU_386) {
-        if (C.msw & 1u) return;
-        for (unsigned i = 0; i < 8u; ++i) C.r[i] = (C.r[i] & 0xFFFF0000u) | m->r[i];
-    } else
-    for (unsigned i = 0; i < 8u; ++i) C.r[i] = m->r[i];
+    /* BB386_PM_STATE_V1: in protected mode microDOS's CS:IP, segments and
+       flags are a stale 16-bit view of selectors and a 32-bit EIP (copying
+       them back truncated EIP to 16 bits every slice), so nothing comes back. */
+    if (C.model >= B86_CPU_386 && (C.msw & 1u)) return;
+    /* BB386_GPR_HIGH_V1: retain 386 high halves across MdX86 slice handoff. */
 """
 
 TRY_OLD = "B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)\n{\n"

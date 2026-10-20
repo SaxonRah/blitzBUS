@@ -3,10 +3,10 @@ BB386_PM_STATE_V1 (extract over C:\, then run once, then rebuild):
     python .\scripts\bb386_pm_state_v1.py
 
 Patches src\bb_live.c in place (backup: bb_live.c.pre_pm_state_v1):
-* to_b86(): 386 real mode keeps the upper halves of EAX..EDI; protected mode
-  copies nothing back from microDOS's 16-bit view (was: upper halves of all
-  GPRs and EIP zeroed, CS/SS/DS/ES reloaded as real-mode segments at every
-  slice and after every hooked BIOS INT).
+* to_b86(): while PE=1 nothing is copied back from microDOS's 16-bit view
+  (was: EIP truncated to 16 bits and CS/SS/DS/ES reloaded as real-mode
+  segments at every slice). Real mode keeps BB386_GPR_HIGH_V1 as is.
+* Targets the chore/blitzbus-repo-cleanup bb_live.c (commit ad3bad6).
 * Between-slice IRQ delivery (real-mode IVT) and the BIOS-segment hand-off
   are skipped while PE=1.
 * v17 "first invalid boundary" check is skipped while PE=1.
