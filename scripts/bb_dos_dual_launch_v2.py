@@ -44,7 +44,9 @@ REPLACE = r'''                # BB_DUAL_INPUT_V2_FIX1: COM5 owner only. ACK afte
                             if($bbV2Num -eq 0 -and $bbV2Modifiers -eq 0 -and $bbV2Char -ge 32 -and $bbV2Char -le 126){
                                 $serial.Write([string][char]$bbV2Char)
                                 $bbV2Mode='SERIAL'
-                            } elseif($bbV2Num -eq 13 -and $bbV2Modifiers -eq 0){
+                            } elseif($bbV2Num -eq 13 -and $bbV2Modifiers -eq 0 -and -not $bbDesStage -and -not $bb622SwapStage){
+                                # BB_DUAL_V2_SWAP_ENTER_V1: while the Alt+G / F9 floppy picker is
+                                # open, Enter must reach the picker (it confirms the disk), not DOS.
                                 $serial.Write("`r")
                                 $bbV2Mode='SERIAL'
                             } elseif($bbV2Num -eq 8 -and $bbV2Modifiers -eq 0){

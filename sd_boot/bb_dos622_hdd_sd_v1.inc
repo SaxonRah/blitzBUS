@@ -9,6 +9,17 @@
 static FIL bb622_hd_fil;
 static bool bb622_hd_open;
 static uint32_t bb622_hd_read_n, bb622_hd_write_n, bb622_hd_error_n;
+/* BB_DOS622_PERF_V1: FatFs fast seek (cluster link map) - without it every
+   backward f_lseek in the 126 MB image walks the FAT chain from the start.
+   Writes are full aligned sectors (FatFs writes them straight to the card);
+   f_sync only every BB622_SYNC_EVERY writes instead of after each one. */
+#ifndef BB622_SYNC_EVERY
+#define BB622_SYNC_EVERY 64u
+#endif
+#if FF_USE_FASTSEEK
+static DWORD bb622_hd_clmt[256];
+#endif
+static uint32_t bb622_hd_unsynced;
 
 bool bb_sd_hdd_available(void) { return bb622_hd_open; }
 
@@ -47,6 +58,16 @@ static void bb622_hd_mount(const char *drive)
         (void)f_close(&bb622_hd_fil);return;
     }
     bb622_hd_read_n=bb622_hd_write_n=bb622_hd_error_n=0;
+#if FF_USE_FASTSEEK
+    bb622_hd_clmt[0]=sizeof bb622_hd_clmt/sizeof bb622_hd_clmt[0];
+    bb622_hd_fil.cltbl=bb622_hd_clmt;
+    fr=f_lseek(&bb622_hd_fil,CREATE_LINKMAP);
+    if(fr!=FR_OK){bb622_hd_fil.cltbl=0;printf("[bb622-hdd] fast seek off (fr=%d, %lu fragments)\n",(int)fr,(unsigned long)bb622_hd_clmt[0]);}
+    else printf("[bb622-hdd] fast seek ON (%lu link-map words)\n",(unsigned long)bb622_hd_clmt[0]);
+#else
+    printf("[bb622-hdd] fast seek not compiled (FF_USE_FASTSEEK=0)\n");
+#endif
+    bb622_hd_unsynced=0;
     bb622_hd_open=true;
     printf("[bb622-hdd] BIOS 80h mounted RW 256x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
 }
@@ -75,12 +96,18 @@ bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
     bb622_retime_spi1();
     fr=f_lseek(&bb622_hd_fil,(FSIZE_t)lba*512u);
     if(fr==FR_OK)fr=f_write(&bb622_hd_fil,buf,512u,&put);
-    if(fr==FR_OK&&put==512u)fr=f_sync(&bb622_hd_fil);
+    if(fr==FR_OK&&put==512u&&++bb622_hd_unsynced>=BB622_SYNC_EVERY){fr=f_sync(&bb622_hd_fil);bb622_hd_unsynced=0;}
     if(fr!=FR_OK||put!=512u){
         if(++bb622_hd_error_n<=8u)printf("[bb622-hdd] WRITE FAIL lba=%lu fr=%d bytes=%u\n",(unsigned long)lba,(int)fr,(unsigned)put);
         return false;
     }
-    if(++bb622_hd_write_n<=8u)printf("[bb622-hdd] write LBA=%lu SYNC OK\n",(unsigned long)lba);
+    if(++bb622_hd_write_n<=8u)printf("[bb622-hdd] write LBA=%lu OK\n",(unsigned long)lba);
     return true;
+}
+
+/* BB_DOS622_PERF_V1: flush pending HDD writes (call when idle / on exit) */
+void bb_sd_hdd_flush(void)
+{
+    if(bb622_hd_open&&bb622_hd_unsynced){bb622_retime_spi1();(void)f_sync(&bb622_hd_fil);bb622_hd_unsynced=0;}
 }
 #endif

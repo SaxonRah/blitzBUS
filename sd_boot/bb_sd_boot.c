@@ -439,8 +439,12 @@ bool bb_sd_b_select(unsigned selected)
 {
     FIL *candidate;
     FRESULT fr;
-    UINT got=0u;
-    uint8_t boot[512];
+    UINT got=0u, got2=0u;
+    /* BB_SWAP_STACK_V2: only the BPB fields and the 55AA signature are
+       checked, so read 32 + 2 bytes instead of a 512-byte stack buffer
+       (the swap runs from the console poll on core 0's 4 KiB stack, under
+       FatFs; static buffers would cost scarce SRAM). */
+    uint8_t boot[32], sig[2];
     char path[96];
     if(selected<1u || selected>5u || !bb_img_open)return false;
     if(selected==bb_b_number && bb_b_open)return true;
@@ -454,8 +458,10 @@ bool bb_sd_b_select(unsigned selected)
         return false;
     }
     if(f_size(candidate)!=1474560u ||
-       f_read(candidate,boot,512u,&got)!=FR_OK || got!=512u ||
-       boot[510]!=0x55u || boot[511]!=0xAAu ||
+       f_read(candidate,boot,32u,&got)!=FR_OK || got!=32u ||
+       f_lseek(candidate,510u)!=FR_OK ||
+       f_read(candidate,sig,2u,&got2)!=FR_OK || got2!=2u ||
+       sig[0]!=0x55u || sig[1]!=0xAAu ||
        (boot[0]!=0xEBu && boot[0]!=0xE9u) ||
        boot[11]!=0u || boot[12]!=2u || boot[13]!=1u ||
        boot[16]!=2u || boot[19]!=0x40u || boot[20]!=0x0Bu){

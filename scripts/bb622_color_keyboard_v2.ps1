@@ -227,6 +227,21 @@ function Handle-BbV2Keyboard {
                 $script:bbInputNeedsDraw=$true
                 continue
             }
+            # BB_V2_EMPTY_LINE_KEYS_V1: with nothing typed in LINE mode, editing
+            # and navigation keys belong to the DOS program (installer menus:
+            # Esc backs up, arrows move), so send them straight through.
+            if($script:bbBuffer.Length -eq 0 -and ($k.Key -eq [ConsoleKey]::Escape -or
+               $k.Key -eq [ConsoleKey]::UpArrow -or $k.Key -eq [ConsoleKey]::DownArrow -or
+               $k.Key -eq [ConsoleKey]::LeftArrow -or $k.Key -eq [ConsoleKey]::RightArrow -or
+               $k.Key -eq [ConsoleKey]::Home -or $k.Key -eq [ConsoleKey]::End -or
+               $k.Key -eq [ConsoleKey]::PageUp -or $k.Key -eq [ConsoleKey]::PageDown -or
+               $k.Key -eq [ConsoleKey]::Insert -or $k.Key -eq [ConsoleKey]::Delete -or
+               $k.Key -eq [ConsoleKey]::Backspace -or $k.Key -eq [ConsoleKey]::Tab)) {
+                Send-BbV2Key $k
+                $script:bbInputStatus="Sent $($k.Key) to DOS (empty line) | F2 LIVE sends every key"
+                $script:bbInputNeedsDraw=$true
+                continue
+            }
             switch($k.Key) {
                 ([ConsoleKey]::Enter) { Send-BbV2Line; break }
                 ([ConsoleKey]::Backspace) {
