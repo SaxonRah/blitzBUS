@@ -2158,6 +2158,14 @@ static void bb386_pm_regs(const char *tag)
            (unsigned)s[B86_GS].selector, (unsigned long)s[B86_GS].base,
            (unsigned long)C.gdt_base, (unsigned long)C.idt_base);
     uint32_t lin = bb386_cs_linear();
+    {   /* BB386_PGSTAT_V1 */
+        extern unsigned long b86_pg_stat_faults, b86_pg_stat_tswitch, b86_pg_stat_walks, b86_pg_stat_flush;
+        printf("[bb386-pm]   pg=%u cr3=%08lX cr2=%08lX pf=%lu tsw=%lu walks=%lu flush=%lu icount=%llu pic irr=%02X isr=%02X imr=%02X tr=%04X\n",
+               (unsigned)C.pg, (unsigned long)C.cr3, (unsigned long)C.cr2,
+               b86_pg_stat_faults, b86_pg_stat_tswitch, b86_pg_stat_walks, b86_pg_stat_flush,
+               (unsigned long long)C.icount, (unsigned)bb_irq36.irr, (unsigned)bb_irq36.isr,
+               (unsigned)bb_irq36.imr, (unsigned)C.tr_sel);
+    }
     printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
     for (uint32_t j = 0; j < 16u; ++j) {
         if (lin + j < B86_RAM_BYTES) printf(" %02X", (unsigned)*b86_host(&C, lin + j));
@@ -2166,21 +2174,53 @@ static void bb386_pm_regs(const char *tag)
     printf("\n");
     fflush(stdout);
 }
+/* BB386_PMIRQ_V1: PIT IRQ0 through the guest IDT while CR0.PE=1. */
+#ifndef BB386_PM_IRQ0
+#define BB386_PM_IRQ0 1
+#endif
+static unsigned long bb386_pmirq_delivered, bb386_pmirq_blocked;
+static void bb386_pmirq_poll(void)
+{
+    if (!BB386_PM_IRQ0 || C.model < B86_CPU_386 || !(C.msw & 1u)) return;
+    bb_irq36_schedule(bb_now_us());
+    if (!(bb_irq36.irr & 1u) || (bb_irq36.imr & 1u) || (bb_irq36.isr & 1u)) return;
+    if (!b86_irq(&C, bb_irq36.base)) { ++bb386_pmirq_blocked; return; }   /* IF=0 or mid-transition */
+    bb_irq36.irr &= (uint8_t)~1u;
+    if (!bb_irq36.auto_eoi) bb_irq36.isr |= 1u;
+    bb_irq36.delivered++;
+    ++bb386_pmirq_delivered;
+    if (bb386_pmirq_delivered <= 4u || (bb386_pmirq_delivered & (bb386_pmirq_delivered - 1u)) == 0u) {
+        printf("[bb386-irq] IRQ0 #%lu -> INT %02X in protected mode at %04X:%08lX pit-reload=%u (%lu Hz) blocked=%lu edges=%llu coalesced=%llu\n",
+               bb386_pmirq_delivered, (unsigned)bb_irq36.base, (unsigned)(uint16_t)C.seg[B86_CS],
+               (unsigned long)C.ip, (unsigned)(bb_pit.c[0].reload_raw ? bb_pit.c[0].reload_raw : 65536u),
+               (unsigned long)(1193182u / (bb_pit.c[0].reload_raw ? bb_pit.c[0].reload_raw : 65536u)),
+               bb386_pmirq_blocked, (unsigned long long)bb_irq36.edges, (unsigned long long)bb_irq36.coalesced);
+        fflush(stdout);
+    }
+}
+
 static void bb386_pm_track(int rc)
 {
     const int pm = bb386_pm();
+    static unsigned long bb386_pm_entries;   /* BB386_QUIET_V1: log switches 1,2,4,8,... */
+    const int bb386_loud = bb386_pm_entries < 2u || !(bb386_pm_entries & (bb386_pm_entries - 1u));
     if (pm && !bb386_pm_was) {
-        printf("[bb386-pm] ENTER protected mode (rc=%s retired=%lu)\n", bb386_rc_name(rc), (unsigned long)C.icnt);
-        bb386_pm_regs("enter");
-    } else if (!pm && bb386_pm_was) {
-        printf("[bb386-pm] LEAVE protected mode -> real mode %04X:%04X after %lu PM slices\n",
-               (unsigned)C.seg[B86_CS], (unsigned)(C.ip & 0xFFFFu), bb386_pm_slices);
+        ++bb386_pm_entries;
+        if (bb386_pm_entries <= 2u || !(bb386_pm_entries & (bb386_pm_entries - 1u))) {
+            printf("[bb386-pm] ENTER protected mode #%lu (rc=%s retired=%lu)\n",
+                   bb386_pm_entries, bb386_rc_name(rc), (unsigned long)C.icnt);
+            bb386_pm_regs("enter");
+        }
+    } else if (!pm && bb386_pm_was && bb386_loud) {
+        printf("[bb386-pm] LEAVE protected mode #%lu -> real mode %04X:%04X after %lu PM slices\n",
+               bb386_pm_entries, (unsigned)C.seg[B86_CS], (unsigned)(C.ip & 0xFFFFu), bb386_pm_slices);
         fflush(stdout);
     }
     bb386_pm_was = pm;
     if (pm) {
         ++bb386_pm_slices;
-        if ((bb386_pm_slices & (bb386_pm_slices - 1u)) == 0u && bb386_pm_slices >= 2u) {
+        if (((bb386_pm_slices & (bb386_pm_slices - 1u)) == 0u && bb386_pm_slices >= 2u) ||
+            (bb386_pm_slices & 4095u) == 0u) {   /* BB386_PGSTAT_V1 */
             char tag[40];
             snprintf(tag, sizeof tag, "slice=%lu rc=%s", bb386_pm_slices, bb386_rc_name(rc));
             bb386_pm_regs(tag);
@@ -2349,6 +2389,9 @@ static void bb386_v14_snapshot(const char *tag, uint16_t entry_cs, uint32_t entr
  * cold/JIT slice from 0019:4237). Trace all next 8 dispatches after PM exit,
  * not only dispatches whose entry IP happens to equal the call site.
  * Read-only, allocation-free, no flag materialization or guest steps. */
+#ifndef BB386_TRACE_PM_EXIT
+#define BB386_TRACE_PM_EXIT 0   /* BB386_QUIET_V1: 1 = V13/V15 per-PM-exit traces */
+#endif
 static unsigned bb386_v15_remaining;
 static int bb386_v15_before(int was_pm)
 {
@@ -2357,8 +2400,8 @@ static int bb386_v15_before(int was_pm)
 static int bb386_v15_after(int was_pm, int now_pm, int watched)
 {
     if (was_pm && !now_pm) {
-        bb386_v15_remaining=8u;
-        return 1;
+        bb386_v15_remaining=BB386_TRACE_PM_EXIT ? 8u : 0u;   /* BB386_QUIET_V1 */
+        return BB386_TRACE_PM_EXIT != 0;
     }
     if (watched && bb386_v15_remaining) --bb386_v15_remaining;
     return 0;
@@ -2617,7 +2660,19 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
         rc=bb622_steptrace_run(&C,bios_seg);
     else
 #endif
-        rc=b86_jit_run(&C, bb_v10_budget);
+        rc=(bb386_pmirq_poll(), b86_jit_run(&C, bb_v10_budget));   /* BB386_PMIRQ_V1 */
+    /* BB386_PMSLICE_V1: protected mode keeps the CPU for several slice ticks. */
+#ifndef BB386_PM_SLICE_US
+#define BB386_PM_SLICE_US 8000u
+#endif
+    if (BB386_PM_SLICE_US && C.model >= B86_CPU_386) {
+        while (rc == B86_EXIT && (C.msw & 1u) && C.irq == 1u &&
+               bb_now_us() - v24_jit_t0 < (uint64_t)BB386_PM_SLICE_US) {
+            C.irq = 0u;
+            bb386_pmirq_poll();                                   /* BB386_PMIRQ_V1 */
+            rc = b86_jit_run(&C, bb_v10_budget);
+        }
+    }
     rc=bb386_v12_cold_miss(rc);
     if (bb386_v14_site) bb386_v14_snapshot("AFTER", bb386_v13_pre_cs, bb386_v13_pre_ip);
     const int bb386_v15_exit = bb386_v15_after(bb386_v13_pre_pm, (C.msw & 1u) != 0u, bb386_v15_watch);
@@ -2625,7 +2680,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (bb386_v15_watch) bb386_v15_snapshot("AFTER", bb386_v13_pre_cs, bb386_v13_pre_ip);
     if (C.model >= B86_CPU_386) {
         if (bb386_v13_pre_pm) bb386_v13_was_pm = 1u;
-        if (bb386_v13_pre_pm && !(C.msw & 1u)) bb386_v13_follow = 6u;
+        if (bb386_v13_pre_pm && !(C.msw & 1u)) bb386_v13_follow = BB386_TRACE_PM_EXIT ? 6u : 0u;   /* BB386_QUIET_V1 */
         if (bb386_v13_follow ||
             (bb386_v13_was_pm && (rc == B86_HALT || rc == B86_UNSUPPORTED || rc == B86_SHUTDOWN))) {
             bb386_v13_dump(rc,bb386_v13_pre_cs,bb386_v13_pre_ip,

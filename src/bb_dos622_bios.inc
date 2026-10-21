@@ -316,6 +316,35 @@ occupied:
 }
 /* BB622_BIOS_IRQCHAIN_V1_END */
 
+/* BB622_BIOS_STUBS_V1: ROM entry points for the serviced BIOS vectors so
+ * PUSHF; CALL FAR [vector] chaining (DOS/4GW INT 15h BF01 probe) works. */
+static void BB622_FLASH bb622_bios_stubs_seed(MdRuntime *rt)
+{
+    MdX86 *c = &rt->cpu;
+    static const uint8_t vecs[] = { 0x10u,0x11u,0x12u,0x13u,0x14u,0x15u,0x16u,0x17u,0x1Au };
+    const uint16_t seg = 0xF000u;
+    unsigned seeded = 0u, i, k;
+    for (i = 0u; i < sizeof vecs; ++i) {
+        const uint8_t v = vecs[i];
+        const uint16_t off = (uint16_t)(0x0140u + 8u * (uint16_t)(v - 0x10u));
+        const uint8_t stub[5] = { 0xCDu, v, 0xCAu, 0x02u, 0x00u };   /* int v; retf 2 */
+        if (md_x86_read16(c, 0u, (uint16_t)(v * 4u)) | md_x86_read16(c, 0u, (uint16_t)(v * 4u + 2u)))
+            continue;                                   /* never replace a valid vector */
+        for (k = 0u; k < sizeof stub; ++k) {
+            uint8_t b = md_x86_read8(c, seg, (uint16_t)(off + k));
+            if (b != 0u && b != stub[k]) break;
+        }
+        if (k != sizeof stub) continue;                 /* ROM bytes occupied */
+        for (k = 0u; k < sizeof stub; ++k) md_x86_write8(c, seg, (uint16_t)(off + k), stub[k]);
+        md_x86_write16(c, 0u, (uint16_t)(v * 4u), off);
+        md_x86_write16(c, 0u, (uint16_t)(v * 4u + 2u), seg);
+        md_runtime_mark_code_range(rt, seg, off, (uint32_t)sizeof stub);
+        ++seeded;
+    }
+    printf("[bb622-biosstub] %u BIOS vectors -> F000:0140.. (INT v; RETF 2) for far-call chaining\n", seeded);
+    fflush(stdout);
+}
+
 static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
 {
     MdX86 *c = &rt->cpu;
@@ -347,6 +376,7 @@ static bool BB622_FLASH bb622_boot_floppy(MdRuntime *rt)
     /* Preserve DOS2 kernel bytes for rollback; establish only BIOS BDA/IVT
        fields the genuine bootstrap immediately needs. */
     bb622_bios_irqchain_seed(rt); /* BB622_BIOS_IRQCHAIN_V1: seed before DOS captures old INT08 */
+    bb622_bios_stubs_seed(rt);    /* BB622_BIOS_STUBS_V1: before DOS captures original vectors */
     md_x86_write16(c, 0x0000u, 0x0078u, 0x0100u); /* INT1E floppy table */
     md_x86_write16(c, 0x0000u, 0x007Au, 0x0050u);
     for (i = 0; i < sizeof dpt; ++i) md_x86_write8(c, 0x0050u, (uint16_t)(0x0100u + i), dpt[i]);
