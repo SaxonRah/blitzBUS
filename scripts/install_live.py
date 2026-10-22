@@ -266,7 +266,7 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u BB_NO_CHAIN={no_chain} BB_CHAIN_PROFILE=1
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
-    B86_RAM_FUNCS=1 B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
+    B86_RAM_FUNCS=1 B86_PJ={os.environ.get("BB_PJ","1")} B86_PJ_HASH=512u B86_PJ_CPS=256u BB_PJ_PSRAM={os.environ.get("BB_PJ_PSRAM","1")}{(" BB_PJ_CODE_KB="+os.environ["BB_PJ_CODE_KB"]) if os.environ.get("BB_PJ_CODE_KB") else ""} B86_PM_RAM={os.environ.get("BB_PM_RAM","1")} B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
     PICO_STACK_SIZE=0x1000 PICO_CORE1_STACK_SIZE=0x1000
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1

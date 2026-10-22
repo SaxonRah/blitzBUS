@@ -831,6 +831,7 @@ static uint8_t bb_v23_scan(unsigned c) {
     if(c==' ')return 0x39;
     return 0u;
 }
+static void bb386_kbd_push(uint8_t scan);   /* BB386_PMKBD_V1 */
 static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     if(c==10u)c=13u;
     if(c==127u)c=8u;
@@ -843,6 +844,7 @@ static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     bb_v22_write_word(m,0x400u+tail,(uint16_t)(((uint16_t)bb_v23_scan(c)<<8)|c));
     bb_v22_write_word(m,0x41cu,next);
     ++bb_v23_keys;
+    bb386_kbd_push(bb_v23_scan(c));   /* BB386_PMKBD_V1 */
     printf("[bb-v23] KEY ascii=%02X scan=%02X queued=%lu\n",c,bb_v23_scan(c),(unsigned long)bb_v23_keys);
 }
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -892,6 +894,7 @@ static void bb622_vt_scancode(uint8_t *m,uint8_t scan) {
     bb_v22_write_word(m,0x400u+t,(uint16_t)((uint16_t)scan<<8));
     bb_v22_write_word(m,0x41cu,next);
     ++bb_v23_keys;
+    bb386_kbd_push(scan);   /* BB386_PMKBD_V1 */
     if(bb622_vt_logged++<32u) {
         printf("[bb622-vtkey] scan=%02X AX=%04X queued=%lu\n",
             (unsigned)scan,(unsigned)(scan<<8),(unsigned long)bb_v23_keys);
@@ -1731,9 +1734,36 @@ static void bb_v61_port(uint16_t port, uint8_t v)
         bb_v61_last_frame_us = 0; bb_v61_a000_bytes = 0; bb_v61_render_reported = 0;
     }
 }
+/* BB386_PMKBD_V1: scancode queue, port 60h/64h and IRQ1 in protected mode. */
+#ifndef BB386_PM_KBD
+#define BB386_PM_KBD 1
+#endif
+static uint8_t bb386_kq[64], bb386_kq_head, bb386_kq_tail, bb386_k60, bb386_kobf;
+static uint64_t bb386_kbd_pm_us, bb386_k_ready_us;
+static unsigned long bb386_kbd_irqs;
+static void bb386_kq_put(uint8_t v)
+{
+    const uint8_t next = (uint8_t)((bb386_kq_tail + 1u) & 63u);
+    if (next != bb386_kq_head) { bb386_kq[bb386_kq_tail] = v; bb386_kq_tail = next; }
+}
+static void bb386_kbd_push(uint8_t scan)
+{
+    if (!BB386_PM_KBD || !scan || C.model < B86_CPU_386) return;
+    if (!bb386_kbd_pm_us || bb_now_us() - bb386_kbd_pm_us > 2000000u) return;   /* DOS: BIOS buffer only */
+    bb386_kq_put(scan);
+    bb386_kq_put((uint8_t)(scan | 0x80u));
+}
+static int bb386_kbd_port_in(uint16_t port, uint8_t *v)
+{
+    if (!BB386_PM_KBD || !bb386_kbd_pm_us) return 0;
+    if (port == 0x60u) { *v = bb386_k60; bb386_kobf = 0u; return 1; }
+    if (port == 0x64u) { *v = (uint8_t)(0x1Cu | bb386_kobf); return 1; }
+    return 0;
+}
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     uint8_t result;
+    if(bb386_kbd_port_in(port,&result))return result;   /* BB386_PMKBD_V1 */
     if(bb_irq36_in(port,&result))return result;
     if(bb_pit_in(port,&result,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return result;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -1892,6 +1922,34 @@ static int start(MdRuntime *rt)
 #endif
     printf("[bb622-diag] 07 before.jit_create\n"); fflush(stdout);
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
+
+#if defined(B86_PJ) && B86_PJ   /* BB386_PJ_V1: native protected-mode translator */
+    {
+#ifndef BB_PJ_PSRAM
+#define BB_PJ_PSRAM 1                       /* code buffer in PSRAM (runs through the XIP cache) */
+#endif
+#if BB_PJ_PSRAM && defined(__uninitialized_psram)
+#ifndef BB_PJ_CODE_KB
+#define BB_PJ_CODE_KB 512
+#endif
+        static uint8_t __uninitialized_psram("zzz_bb_pj_code") __attribute__((aligned(64))) bb_pj_code[BB_PJ_CODE_KB * 1024u];
+        const char *bb_pj_where = "PSRAM";
+#else
+#ifndef BB_PJ_CODE_KB
+#define BB_PJ_CODE_KB 64
+#endif
+        static uint8_t bb_pj_code[BB_PJ_CODE_KB * 1024u] __attribute__((aligned(64)));
+        const char *bb_pj_where = "SRAM";
+#endif
+        static uint64_t bb_pj_state[8192u / 8u];       /* SRAM: hash tables are probed on every block */
+        if (b86_pj_attach(&C, bb_pj_state, sizeof bb_pj_state, bb_pj_code, sizeof bb_pj_code))
+            printf("[bb386-pj] native PM translator: %u KiB code in %s at %p, state %u B\n",
+                   (unsigned)BB_PJ_CODE_KB, bb_pj_where, (void *)bb_pj_code, (unsigned)b86_pj_state_bytes());
+        else
+            printf("[bb386-pj] attach FAILED: state needs %u B\n", (unsigned)b86_pj_state_bytes());
+        fflush(stdout);
+    }
+#endif
     printf("[bb622-diag] 08 after.jit_create\n"); fflush(stdout);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -2166,6 +2224,14 @@ static void bb386_pm_regs(const char *tag)
                (unsigned long long)C.icount, (unsigned)bb_irq36.irr, (unsigned)bb_irq36.isr,
                (unsigned)bb_irq36.imr, (unsigned)C.tr_sel);
     }
+#if defined(B86_PJ) && B86_PJ   /* BB386_PJ_V1 */
+    { unsigned long pj[8], so[256]; int k, q, best;
+      b86_pj_stats(&C, pj); b86_pj_stop_ops(&C, so);
+      printf("[bb386-pj]   blocks=%lu flush(smc,full)=%lu,%lu runs=%lu native=%lu (%.1f/run) mem-exits=%lu declined=%lu code=%lu/%lu stops:",
+             pj[0], pj[1] / 1000000ul, pj[1] % 1000000ul, pj[2], pj[3], pj[2] ? (double)pj[3] / (double)pj[2] : 0.0, pj[4], pj[5], pj[6], pj[7]);
+      for (k = 0; k < 8; ++k) { best = 0; for (q = 1; q < 256; ++q) if (so[q] > so[best]) best = q; if (!so[best]) break; printf(" %02X:%lu", best, so[best]); so[best] = 0; }
+      printf("\n"); }
+#endif
     printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
     for (uint32_t j = 0; j < 16u; ++j) {
         if (lin + j < B86_RAM_BYTES) printf(" %02X", (unsigned)*b86_host(&C, lin + j));
@@ -2179,9 +2245,40 @@ static void bb386_pm_regs(const char *tag)
 #define BB386_PM_IRQ0 1
 #endif
 static unsigned long bb386_pmirq_delivered, bb386_pmirq_blocked;
+/* BB386_PMKBD_V1 */
+static void bb386_kbd_poll(void)
+{
+    const uint64_t now = bb_now_us();
+    uint8_t *m = b86_host_phys(&C, 0u);   /* IVT page (honours B86_PAGED mappings) */
+    bb386_kbd_pm_us = now;
+    if (!BB386_PM_KBD) return;
+    if (!bb386_kobf && bb386_kq_head != bb386_kq_tail && now >= bb386_k_ready_us) {
+        bb386_k60 = bb386_kq[bb386_kq_head]; bb386_kq_head = (uint8_t)((bb386_kq_head + 1u) & 63u);
+        bb386_kobf = 1u; bb_irq36.irr |= 2u;
+        bb386_k_ready_us = now + 70000u;                 /* make/break spacing */
+    }
+    if (!(bb_irq36.irr & 2u) || (bb_irq36.imr & 2u) || (bb_irq36.isr & 3u)) return;
+    if ((bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u)) return;   /* IRQ0 first */
+    if (!(m[0x24] | m[0x25] | m[0x26] | m[0x27])) {      /* null real-mode INT 09h: seed a safe one */
+        static const uint8_t stub[] = { 0x50, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF };
+        uint8_t *s = b86_host_phys(&C, 0xF01A0u);
+        for (unsigned i = 0; i < sizeof stub; ++i) s[i] = stub[i];
+        m[0x24] = 0xA0; m[0x25] = 0x01; m[0x26] = 0x00; m[0x27] = 0xF0;
+    }
+    if (!b86_irq(&C, (uint8_t)(bb_irq36.base + 1u))) return;
+    bb_irq36.irr &= (uint8_t)~2u;
+    if (!bb_irq36.auto_eoi) bb_irq36.isr |= 2u;
+    if (++bb386_kbd_irqs <= 8u || (bb386_kbd_irqs & (bb386_kbd_irqs - 1u)) == 0u) {
+        printf("[bb386-kbd] IRQ1 #%lu scancode %02X -> INT %02X in protected mode at %04X:%08lX\n",
+               bb386_kbd_irqs, (unsigned)bb386_k60, (unsigned)(bb_irq36.base + 1u),
+               (unsigned)(uint16_t)C.seg[B86_CS], (unsigned long)C.ip);
+        fflush(stdout);
+    }
+}
 static void bb386_pmirq_poll(void)
 {
     if (!BB386_PM_IRQ0 || C.model < B86_CPU_386 || !(C.msw & 1u)) return;
+    bb386_kbd_poll();                                         /* BB386_PMKBD_V1 */
     bb_irq36_schedule(bb_now_us());
     if (!(bb_irq36.irr & 1u) || (bb_irq36.imr & 1u) || (bb_irq36.isr & 1u)) return;
     if (!b86_irq(&C, bb_irq36.base)) { ++bb386_pmirq_blocked; return; }   /* IF=0 or mid-transition */
