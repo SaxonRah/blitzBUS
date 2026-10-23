@@ -2248,6 +2248,68 @@ static void bb386_pm_regs(const char *tag)
              (unsigned long long)total, total ? 100.0 * (double)nat / (double)total : 0.0);
     }
 #endif
+#if defined(B86_PJ) && B86_PJ /* BB_PJ_TLB_0F_V1 */
+    {   unsigned long mm[8];
+        const unsigned long *stops;
+        /* BB_PJ_TLB_0F_COMPILEFIX_V1: functions implemented in blitz86/interp.c.
+         * bb_live.c is a separate translation unit and needs explicit prototypes. */
+        extern void b86_pj_mem_profile(const B86Cpu *c, unsigned long out[8]);
+        extern const unsigned long *b86_pj_0f_stop(const B86Cpu *c);
+        extern unsigned b86_pj_tlb_mode(void);
+        extern void b86_pj_es_stats(const B86Cpu *c, unsigned long out[4]);
+        extern unsigned long b86_pm_c_0f_exec[256];
+        /* BB_PJ_SHIFTD_GS_X87_V1: actual retired x87 fallback family. */
+        extern unsigned long b86_pm_c_x87_exec[8];
+        { unsigned x; unsigned long total=0;
+          for (x=0; x<8u; ++x) total += b86_pm_c_x87_exec[x];
+          printf("[bb386-x87] c-executed=%lu D8:%lu D9:%lu DA:%lu DB:%lu DC:%lu DD:%lu DE:%lu DF:%lu\n",
+                 total, b86_pm_c_x87_exec[0], b86_pm_c_x87_exec[1],
+                 b86_pm_c_x87_exec[2], b86_pm_c_x87_exec[3], b86_pm_c_x87_exec[4],
+                 b86_pm_c_x87_exec[5], b86_pm_c_x87_exec[6], b86_pm_c_x87_exec[7]);
+        }
+        b86_pj_mem_profile(&C, mm);
+        /* BB_PJ_ES_INDEPENDENT_V1: compact ES guard, no huge site table. */
+        { unsigned long es[4];
+          b86_pj_es_stats(&C, es);
+          printf("[bb386-es] mode=%lu mode-flushes=%lu relaxed-entries=%lu guarded-stops=%lu\n",
+                 es[0], es[1], es[2], es[3]);
+        }
+        stops = b86_pj_0f_stop(&C);
+        printf("[bb386-mem] tlb-mode=%u calls=%lu paged=%lu hits=%lu walks=%lu refusals=%lu cross=%lu bounds=%lu writes=%lu\n",
+               b86_pj_tlb_mode(), mm[0], mm[1], mm[2], mm[3], mm[4], mm[5], mm[6], mm[7]);
+        { unsigned q, k, selected[8]; unsigned long sum = 0;
+          for (q = 0; q < 256u; ++q) sum += b86_pm_c_0f_exec[q];
+          printf("[bb386-0f] c-executed=%lu top:", sum);
+          for (k = 0; k < 8u; ++k) {
+              unsigned best = 0u; unsigned long top = 0u;
+              for (q = 0; q < 256u; ++q) {
+                  unsigned x, used = 0u;
+                  for (x = 0; x < k; ++x) if (selected[x] == q) { used = 1u; break; }
+                  if (!used && b86_pm_c_0f_exec[q] > top) { top = b86_pm_c_0f_exec[q]; best = q; }
+              }
+              if (!top) break;
+              selected[k] = best; printf(" %02X:%lu", best, top);
+          }
+          printf("\n");
+        }
+        if (stops) {
+          unsigned q, k, selected[8]; unsigned long sum = 0;
+          for (q = 0; q < 256u; ++q) sum += stops[q];
+          printf("[bb386-0f] translate-stops=%lu top:", sum);
+          for (k = 0; k < 8u; ++k) {
+              unsigned best = 0u; unsigned long top = 0u;
+              for (q = 0; q < 256u; ++q) {
+                  unsigned x, used = 0u;
+                  for (x = 0; x < k; ++x) if (selected[x] == q) { used = 1u; break; }
+                  if (!used && stops[q] > top) { top = stops[q]; best = q; }
+              }
+              if (!top) break;
+              selected[k] = best; printf(" %02X:%lu", best, top);
+          }
+          printf("\n");
+        }
+    }
+#endif
     printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
     for (uint32_t j = 0; j < 16u; ++j) {
         if (lin + j < B86_RAM_BYTES) printf(" %02X", (unsigned)*b86_host(&C, lin + j));
