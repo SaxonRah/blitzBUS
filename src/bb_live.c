@@ -2231,6 +2231,22 @@ static void bb386_pm_regs(const char *tag)
              pj[0], pj[1] / 1000000ul, pj[1] % 1000000ul, pj[2], pj[3], pj[2] ? (double)pj[3] / (double)pj[2] : 0.0, pj[4], pj[5], pj[6], pj[7]);
       for (k = 0; k < 8; ++k) { best = 0; for (q = 1; q < 256; ++q) if (so[q] > so[best]) best = q; if (!so[best]) break; printf(" %02X:%lu", best, so[best]); so[best] = 0; }
       printf("\n"); }
+    { /* BB_PJ_REPNE_EFFICIENCY_V1: no effect on emulated state. */
+      extern void b86_pj_repne_stats(const B86Cpu *c, unsigned long out[6]);
+      unsigned long st[6];
+      b86_pj_repne_stats(&C, st);
+      printf("[bb386-repne] calls=%lu completed=%lu budget-yields=%lu memory-refusals=%lu comparisons=%lu page-spans=%lu\n",
+             st[0], st[1], st[2], st[3], st[4], st[5]);
+    }
+#endif
+#if defined(B86_PJ) && B86_PJ /* BB_PJ_C1_E3_66_V1 */
+    { extern uint64_t b86_pm_pj_guest_insns, b86_pm_c_guest_insns;
+      const uint64_t nat = b86_pm_pj_guest_insns, slow = b86_pm_c_guest_insns;
+      const uint64_t total = nat + slow;
+      printf("[bb386-coverage] pm-pj=%llu pm-c=%llu total=%llu native-pct=%.1f\n",
+             (unsigned long long)nat, (unsigned long long)slow,
+             (unsigned long long)total, total ? 100.0 * (double)nat / (double)total : 0.0);
+    }
 #endif
     printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
     for (uint32_t j = 0; j < 16u; ++j) {
