@@ -13,12 +13,14 @@ $env:BB_CPU = '386'
 $env:BB_CPU_MODEL = '3'
 $env:BB_386_NATIVE_T1 = '1'
 $env:BB_SD_BOOT = '1'
-$env:BB_CODE_KB = '224'
 $env:BB_GUEST_KB = '4096'
 $env:BB_LCD_PERI_HZ = '150000000'
 $env:BB_LCD_SPI_HZ = '75000000'
 $env:BB_LCD_LACE = '1'
 $env:BB_BBUF_SRAM = '0'
+$env:BB_CODE_KB = '192'
+
+$env:BB_CODE_KB = '224'
 
 .\bb.bat dos boot -Seconds 0 -ConsoleView Raw
 
@@ -37,17 +39,16 @@ reconnect
   
  
 cd C:\blitzBUS
-
 $env:BB_CPU = '386'
 $env:BB_CPU_MODEL = '3'
 $env:BB_386_NATIVE_T1 = '1'
 $env:BB_SD_BOOT = '1'
-$env:BB_CODE_KB = '224'
 $env:BB_GUEST_KB = '4096'
 $env:BB_LCD_PERI_HZ = '150000000'
 $env:BB_LCD_SPI_HZ = '75000000'
 $env:BB_LCD_LACE = '1'
 $env:BB_BBUF_SRAM = '0'
+$env:BB_CODE_KB = '192'
 
 .\scripts\bb_live_run_dos622_irqtrial.ps1 `
   -MicroDOS C:\microDOS `

@@ -2258,7 +2258,7 @@ static void bb386_kbd_poll(void)
         bb386_k_ready_us = now + 70000u;                 /* make/break spacing */
     }
     if (!(bb_irq36.irr & 2u) || (bb_irq36.imr & 2u) || (bb_irq36.isr & 3u)) return;
-    if ((bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u)) return;   /* IRQ0 first */
+    if (BB386_PM_IRQ0 && (bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u)) return;   /* IRQ0 first only when enabled */
     if (!(m[0x24] | m[0x25] | m[0x26] | m[0x27])) {      /* null real-mode INT 09h: seed a safe one */
         static const uint8_t stub[] = { 0x50, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF };
         uint8_t *s = b86_host_phys(&C, 0xF01A0u);
@@ -2277,8 +2277,9 @@ static void bb386_kbd_poll(void)
 }
 static void bb386_pmirq_poll(void)
 {
-    if (!BB386_PM_IRQ0 || C.model < B86_CPU_386 || !(C.msw & 1u)) return;
+    if (C.model < B86_CPU_386 || !(C.msw & 1u)) return;
     bb386_kbd_poll();                                         /* BB386_PMKBD_V1 */
+    if (!BB386_PM_IRQ0) return;  /* IRQ1 is independently enabled */
     bb_irq36_schedule(bb_now_us());
     if (!(bb_irq36.irr & 1u) || (bb_irq36.imr & 1u) || (bb_irq36.isr & 1u)) return;
     if (!b86_irq(&C, bb_irq36.base)) { ++bb386_pmirq_blocked; return; }   /* IF=0 or mid-transition */
