@@ -2257,6 +2257,7 @@ static void bb386_pm_regs(const char *tag)
         extern const unsigned long *b86_pj_0f_stop(const B86Cpu *c);
         extern unsigned b86_pj_tlb_mode(void);
         extern void b86_pj_es_stats(const B86Cpu *c, unsigned long out[4]);
+        extern void b86_pj_es_skip_stats(const B86Cpu *c, unsigned long out[3]);
         extern unsigned long b86_pm_c_0f_exec[256];
         /* BB_PJ_SHIFTD_GS_X87_V1: actual retired x87 fallback family. */
         extern unsigned long b86_pm_c_x87_exec[8];
@@ -2271,8 +2272,13 @@ static void bb386_pm_regs(const char *tag)
         /* BB_PJ_ES_INDEPENDENT_V1: compact ES guard, no huge site table. */
         { unsigned long es[4];
           b86_pj_es_stats(&C, es);
-          printf("[bb386-es] mode=%lu mode-flushes=%lu relaxed-entries=%lu guarded-stops=%lu\n",
+          printf("[bb386-es] mode=%lu mode-switches=%lu relaxed-entries=%lu guarded-exits=%lu\n",
                  es[0], es[1], es[2], es[3]);
+          { unsigned long skip[3];
+            b86_pj_es_skip_stats(&C, skip);
+            printf("[bb386-es-skip] checks=%lu hits=%lu marks=%lu\n",
+                   skip[0], skip[1], skip[2]);
+          }
         }
         stops = b86_pj_0f_stop(&C);
         printf("[bb386-mem] tlb-mode=%u calls=%lu paged=%lu hits=%lu walks=%lu refusals=%lu cross=%lu bounds=%lu writes=%lu\n",
