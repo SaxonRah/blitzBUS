@@ -33,8 +33,22 @@ static void bb_pit_init(uint64_t now) {
 static uint16_t bb_pit_count(unsigned channel,uint64_t now) {
     BbPitChannel *c=&bb_pit.c[channel];
     const uint32_t reload=c->reload_raw?c->reload_raw:65536u;
-    const uint64_t cycles=now>=c->epoch_us?((now-c->epoch_us)*BB_PIT_HZ)/1000000ull:0ull;
-    const uint32_t phase=(uint32_t)(cycles%reload);
+/* BB_STAGE5C_PIT_FASTMATH_V1 */
+    /* Exact 32-bit evaluation of floor(delta_us * 1193182 / 1000000).
+     * Bound to 3 seconds: both fractional terms fit in uint32_t.
+     * Longer intervals execute the unchanged full-range formula. */
+    const uint64_t elapsed = now>=c->epoch_us ? now-c->epoch_us : 0ull;
+    uint32_t phase;
+    if (elapsed <= 3000000ull) {
+        const uint32_t whole_ms = (uint32_t)elapsed / 1000u;
+        const uint32_t leftover_us = (uint32_t)elapsed % 1000u;
+        const uint32_t cycles = whole_ms * 1193u +
+            (whole_ms * 182000u + leftover_us * 1193182u) / 1000000u;
+        phase = cycles % reload;
+    } else {
+        const uint64_t cycles = (elapsed * BB_PIT_HZ) / 1000000ull;
+        phase = (uint32_t)(cycles % reload);
+    }
     if (c->mode==3) {
         /* Square wave: counter decreases in steps of two, odd divisors
            retain the high half for one extra input clock. */
