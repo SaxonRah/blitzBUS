@@ -1948,6 +1948,15 @@ static int start(MdRuntime *rt)
         else
             printf("[bb386-pj] attach FAILED: state needs %u B\n", (unsigned)b86_pj_state_bytes());
         fflush(stdout);
+#if defined(BB_PJ_HOT_KB) && BB_PJ_HOT_KB > 0   /* BB386_PJ_HOT_V1 */
+        {
+            extern int b86_pj_attach_hot(B86Cpu *c, void *buf, size_t bytes);
+            static uint8_t bb_pj_hot[BB_PJ_HOT_KB * 1024u] __attribute__((aligned(64)));   /* SRAM */
+            const int ok = b86_pj_attach_hot(&C, bb_pj_hot, sizeof bb_pj_hot);
+            printf("[bb386-pj] SRAM hot tier: %u KiB at %p %s\n", (unsigned)BB_PJ_HOT_KB, (void *)bb_pj_hot, ok ? "on" : "FAILED");
+            fflush(stdout);
+        }
+#endif
     }
 #endif
     printf("[bb622-diag] 08 after.jit_create\n"); fflush(stdout);
@@ -2227,6 +2236,25 @@ static void bb386_pm_regs(const char *tag)
 #if defined(B86_PJ) && B86_PJ   /* BB386_PJ_V1 */
     { unsigned long pj[8], so[256]; int k, q, best;
       b86_pj_stats(&C, pj); b86_pj_stop_ops(&C, so);
+      { /* BB386_PJ_CHURN_V1 */
+        extern void b86_pj_flush_causes(const B86Cpu *c, unsigned long out[10]);
+        static uint64_t sp_t, sp_i; static unsigned long sp_blocks;
+        unsigned long fc[10];
+        const uint64_t now = time_us_64(), ic = (uint64_t)C.icount;
+        const double dt_ms = sp_t ? (double)(now - sp_t) / 1000.0 : 0.0;
+        b86_pj_stats(&C, pj); b86_pj_flush_causes(&C, fc);
+        printf("[bb386-speed] pm-mips=%.2f pm-insns=%llu wall-ms=%.0f\n",
+               dt_ms > 0.0 ? (double)(ic - sp_i) / (dt_ms * 1000.0) : 0.0,
+               (unsigned long long)(ic - sp_i), dt_ms);
+        printf("[bb386-churn] flushes=%lu smc=%lu full=%lu pm16ctx=%lu codepage=%lu smc-stores=%lu killed=%lu refinds=%lu evictions=%lu unlinks=%lu new-blocks=%lu\n",
+               fc[0], fc[1], fc[2], fc[3], fc[4], fc[5], fc[6], fc[7], fc[8], fc[9], pj[0] - sp_blocks);
+        sp_t = now; sp_i = ic; sp_blocks = pj[0];
+#if defined(BB_PJ_HOT_KB) && BB_PJ_HOT_KB > 0   /* BB386_PJ_HOT_V1 */
+        { extern void b86_pj_hot_stats(const B86Cpu *c, unsigned long out[6]); unsigned long hs[6];
+          b86_pj_hot_stats(&C, hs);
+          printf("[bb386-hot] promotions=%lu resets=%lu refused=%lu used=%lu/%lu trampolines=%lu\n", hs[0], hs[1], hs[2], hs[3], hs[4], hs[5]); }
+#endif
+      }
       printf("[bb386-pj]   blocks=%lu flush(smc,full)=%lu,%lu runs=%lu native=%lu (%.1f/run) mem-exits=%lu declined=%lu code=%lu/%lu stops:",
              pj[0], pj[1] / 1000000ul, pj[1] % 1000000ul, pj[2], pj[3], pj[2] ? (double)pj[3] / (double)pj[2] : 0.0, pj[4], pj[5], pj[6], pj[7]);
       for (k = 0; k < 8; ++k) { best = 0; for (q = 1; q < 256; ++q) if (so[q] > so[best]) best = q; if (!so[best]) break; printf(" %02X:%lu", best, so[best]); so[best] = 0; }
