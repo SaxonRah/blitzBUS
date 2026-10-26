@@ -53,43 +53,6 @@ extern void b86_chain_audit_read(uint32_t out[10]);
 #include "pico/multicore.h"
 extern char __StackBottom[], __StackTop[], __StackOneBottom[], __StackOneTop[];   /* v51 */
 #include "hardware/structs/watchdog.h"
-/* BB386_PJ_PCS_V1: core-0 PC sampler for blitz86 (hot-loop promotion + time profile) */
-#include "hardware/timer.h"
-#include "hardware/irq.h"
-#include "hardware/structs/timer.h"
-#ifndef BB_PCS_US
-#define BB_PCS_US 50u
-#endif
-extern void b86_pj_pc_sample(uint32_t pc);
-static int bb_pcs_alarm = -1;
-void __attribute__((used, noinline, section(".time_critical.bb_pcs_c"))) bb_pcs_c(uint32_t pc)
-{
-    timer0_hw->intr = 1u << bb_pcs_alarm;
-    timer0_hw->alarm[bb_pcs_alarm] = timer0_hw->timerawl + BB_PCS_US;
-    b86_pj_pc_sample(pc);
-}
-/* Exception entry stacked r0-r3, r12, lr, pc, xpsr: the interrupted PC is at
- * [sp, #24] of whichever stack was active. Tail-call the C part with it. */
-void __attribute__((naked, section(".time_critical.bb_pcs_isr"))) bb_pcs_isr(void)
-{
-    __asm volatile(
-        "tst lr, #4      \n"
-        "ite eq          \n"
-        "mrseq r0, msp   \n"
-        "mrsne r0, psp   \n"
-        "ldr r0, [r0, #24]\n"
-        "b bb_pcs_c      \n");
-}
-static void bb_pcs_start(void)
-{
-    bb_pcs_alarm = hardware_alarm_claim_unused(false);
-    if (bb_pcs_alarm < 0) { printf("[bb386-pcs] no free hardware alarm: sampling off\n"); return; }
-    irq_set_exclusive_handler(TIMER0_IRQ_0 + bb_pcs_alarm, bb_pcs_isr);
-    hw_set_bits(&timer0_hw->inte, 1u << bb_pcs_alarm);
-    irq_set_enabled(TIMER0_IRQ_0 + bb_pcs_alarm, true);
-    timer0_hw->alarm[bb_pcs_alarm] = timer0_hw->timerawl + 1000u;
-    printf("[bb386-pcs] PC sampling every %u us on alarm %d\n", (unsigned)BB_PCS_US, bb_pcs_alarm);
-}
 uint64_t bb_now_us(void) { return time_us_64(); }
 /* v38: XIP/QMI cache counters (flash + PSRAM, both cores). The hardware
    counters SATURATE at 2^32-1 (after ~15 s at 300 MHz the old difference
@@ -1987,10 +1950,6 @@ static int start(MdRuntime *rt)
         else
             printf("[bb386-pj] attach FAILED: state needs %u B\n", (unsigned)b86_pj_state_bytes());
         fflush(stdout);
-        bb_pcs_start();   /* BB386_PJ_PCS_V1 */
-        { extern void b86_pj_pc_promote(int on);
-        b86_pj_pc_promote(0);   /* BB386_PJ_PCS_V2 promote */
-        }
         {   /* BB386_PJ_XIP_V1 */
             extern void b86_pj_set_xip_counters(B86Cpu *c, const volatile uint32_t *acc, const volatile uint32_t *hit, const volatile uint32_t *us);
 #if defined(timer0_hw)
@@ -2301,30 +2260,6 @@ static void bb386_pm_regs(const char *tag)
         printf("[bb386-churn] flushes=%lu smc=%lu full=%lu pm16ctx=%lu codepage=%lu smc-stores=%lu killed=%lu refinds=%lu evictions=%lu unlinks=%lu new-blocks=%lu\n",
                fc[0], fc[1], fc[2], fc[3], fc[4], fc[5], fc[6], fc[7], fc[8], fc[9], pj[0] - sp_blocks);
         sp_t = now; sp_i = ic; sp_blocks = pj[0];
-        { /* BB386_PJ_PCS_V2 */
-          extern unsigned b86_pj_pc_top(unsigned n, uint32_t *pc, uint32_t *cnt);
-          extern void b86_jit_flush_causes(const struct B86Jit *j, unsigned long out[3]);
-          uint32_t tp[24], tc[24]; unsigned tn = b86_pj_pc_top(24u, tp, tc), k;
-          unsigned long fc[3];
-          if (tn) {
-            printf("[bb386-pcs-top]");
-            for (k = 0; k < tn; ++k) printf(" %08lX:%lu", (unsigned long)tp[k], (unsigned long)tc[k]);
-            printf("\n");
-          }
-          b86_jit_flush_causes(C.jit, fc);
-          printf("[bb386-rmjit] flushes=%lu pm-return-flushes=%lu pm-return-kept=%lu\n", fc[0], fc[1], fc[2]);
-        }
-        { /* BB386_PJ_PCS_V1 */
-          extern void b86_pj_pc_stats(unsigned long out[8]);
-          static unsigned long pp[8]; unsigned long ps[8], d[8], tot = 0; unsigned k;
-          b86_pj_pc_stats(ps);
-          for (k = 0; k < 8u; ++k) { d[k] = ps[k] - pp[k]; pp[k] = ps[k]; }
-          for (k = 0; k < 7u; ++k) tot += d[k];
-          if (tot)
-            printf("[bb386-pcs] psram=%.1f%% shared=%.1f%% sram-tier=%.1f%% sram-other=%.1f%% flash=%.1f%% other=%.1f%% samples=%lu promoted=%lu\n",
-                   100.0 * d[0] / tot, 100.0 * d[1] / tot, 100.0 * d[2] / tot, 100.0 * d[3] / tot, 100.0 * d[4] / tot,
-                   100.0 * (d[5] + d[6]) / tot, tot, d[7]);
-        }
         { /* BB386_PJ_XIP_V1 */
           extern void b86_pj_xip_split(const B86Cpu *c, unsigned long out[12]);
           static unsigned long xp[12]; static uint64_t xt;

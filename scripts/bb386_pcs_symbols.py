@@ -41,13 +41,18 @@ def load_symbols(nm, elf):
     return syms
 
 def lookup(syms, starts, pc):
+    """function containing pc: a sized symbol that covers it, a zero-size label
+    (veneer, asm entry) only right at its address; else '?' with the nearest name"""
     i = bisect.bisect_right(starts, pc) - 1
-    while i >= 0:
-        a, sz, name = syms[i]
-        if sz == 0 or pc < a + sz: return name if (sz or pc - a < 4096) else "?"
-        if pc - a > 0x100000: break
-        i -= 1
-    return "?"
+    near = None
+    j = i
+    while j >= 0 and pc - syms[j][0] <= 0x40000:
+        a, sz, name = syms[j]
+        if sz and pc < a + sz: return name
+        if not sz and pc - a < 16: return name
+        if near is None: near = (name, pc - a)
+        j -= 1
+    return "? (%s+0x%X)" % near if near else "?"
 
 def region(pc):
     if 0x10000000 <= pc < 0x11000000: return "flash"
@@ -62,13 +67,14 @@ def main():
     ap.add_argument("--last", type=int, default=0)
     ap.add_argument("--top", type=int, default=40)
     a = ap.parse_args()
-    dumps = []
+    dumps, callers = [], []
     with open(a.log, errors="replace") as f:
         for line in f:
-            if line.startswith("[bb386-pcs-top]"):
-                dumps.append([(int(x.split(":")[0], 16), int(x.split(":")[1])) for x in line.split()[1:] if ":" in x])
+            if line.startswith("[bb386-pcs-top]") or line.startswith("[bb386-pcs-callers]"):
+                row = [(int(x.split(":")[0], 16), int(x.split(":")[1])) for x in line.split()[1:] if ":" in x]
+                (dumps if line.startswith("[bb386-pcs-top]") else callers).append(row)
     if not dumps: raise SystemExit("no [bb386-pcs-top] lines in " + a.log)
-    if a.last: dumps = dumps[-a.last:]
+    if a.last: dumps, callers = dumps[-a.last:], callers[-a.last:]
     nm = find_nm(a.nm)
     syms = load_symbols(nm, a.elf)
     starts = [s[0] for s in syms]
@@ -85,6 +91,16 @@ def main():
     print("%7s %6s  %-6s %s" % ("samples", "share", "where", "function"))
     for (fn, reg), n in per_fn.most_common(a.top):
         print("%7d %5.1f%%  %-6s %s" % (n, 100.0 * n / total, reg, fn))
+    if callers:
+        per_c, ctot = Counter(), 0
+        for d in callers:
+            for pc, n in d:
+                per_c[(lookup(syms, starts, pc), region(pc))] += n; ctot += n
+        print()
+        print("callers (LR of the sampled C code; who calls the leaf functions above)")
+        print("%7s %6s  %-6s %s" % ("samples", "share", "where", "function"))
+        for (fn, reg), n in per_c.most_common(a.top):
+            print("%7d %5.1f%%  %-6s %s" % (n, 100.0 * n / ctot, reg, fn))
     return 0
 
 if __name__ == "__main__":
