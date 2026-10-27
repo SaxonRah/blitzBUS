@@ -1,8 +1,0 @@
-{
-  "tag": "BB622_SWAP_ACK_V3",
-  "sourceSha": "6dbf3e6e285f1b205c9ef63fe6bf9dd7f9f683c2bb5bfedcd33b544dbfac950c",
-  "outputs": {
-    "scripts/bb_live_run_dos622_controls_v3.ps1": "1ea25f79cf5ea8eb9e5b6f37a86adce83d49a4fe8c260cea7f34d403b095f408",
-    "scripts/bb622_request_disk_v3.ps1": "5f4287d587eefa39e8777b5b04f404a445030bdeb20d8a8189b3568a99a80662"
-  }
-}

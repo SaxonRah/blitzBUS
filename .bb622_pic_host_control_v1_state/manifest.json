@@ -1,8 +1,0 @@
-{
-  "tag": "BB622_PIC_HOST_CONTROL_V1",
-  "base_sha": "9d28978cd3d9e45c3b82b35cadcfa76d43c70574fc796feea9273985f062a1df",
-  "outputs": {
-    "scripts/bb_live_run_dos622_pic_control.ps1": "6e71648fa119e3995a33bad10949b373b19a1e5c6ceaf2a7530c0ca4f89d9a2a",
-    "scripts/bb622_pic_toggle.ps1": "b9e60afa906af67c89a5fbcc6118a56f6306c8ae2cd1a1133b7b93cc4f61d5cf"
-  }
-}

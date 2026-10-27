@@ -388,6 +388,17 @@ static void bb_v27_convert(unsigned top, uint16_t *dst) {
 
 #endif
 
+/* BB_STAGE5D_LCD_PACER_V1 */
+/* LCD presenter runs on core 1. For interlace this is FIELDS/sec.
+ * 0 means original unlimited; default 30 fields/s (~15 full screens/s).
+ * In non-interlaced mode this is full FRAMES/sec. */
+#ifndef BB_STAGE5D_VGA_MAX_FIELD_HZ
+#define BB_STAGE5D_VGA_MAX_FIELD_HZ 30u
+#endif
+#if BB_STAGE5D_VGA_MAX_FIELD_HZ > 120u
+#error "Stage5D LCD max field Hz must be 0..120"
+#endif
+
 static void bb_v27_presenter(void) {
     for (;;) {
         if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE)) {
@@ -454,6 +465,18 @@ stop_presenting:
            redraws the DOS console.  Never leave DMA in flight. */
         mr_pico_ili9341_flush_wait(NULL,&lcd);
         __atomic_store_n(&bb_v27_busy,0u,__ATOMIC_RELEASE);
+#if BB_STAGE5D_VGA_MAX_FIELD_HZ != 0
+        /* Both DMA buffers are free here. Core 0 can still park us on a
+         * text-mode transition: poll request at most every 1 ms. Do not
+         * use guest PIT time, sleep while SPI DMA is active, or alter VGA. */
+        while (__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE)) {
+            const uint32_t elapsed=(uint32_t)(time_us_32()-frame_start);
+            const uint32_t period=1000000u / BB_STAGE5D_VGA_MAX_FIELD_HZ;
+            if (elapsed>=period) break;
+            const uint32_t remaining=period-elapsed;
+            sleep_us(remaining>1000u?1000u:remaining);
+        }
+#endif
     }
 }
 

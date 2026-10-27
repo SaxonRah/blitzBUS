@@ -1,5 +1,5 @@
 /* BB_DOS622_HDD_V1 -- BIOS INT13h hard disk DL=80h.
- * CHS model fixed to 65 cylinders x 16 heads x 63 sectors.
+ * CHS model fixed to 256 cylinders x 16 heads x 63 sectors.
  * Separate SD file DOS622_HDD.IMG with MBR + FAT16 partition.
  * Only invoked by the DOS622 BIOS interrupt; DOS2 remains unchanged.
  */
@@ -55,18 +55,18 @@ static bool BB622_FLASH bb622_hd_int13(MdRuntime *rt)
     if(ah==0x00u||ah==0x09u||ah==0x0Cu||ah==0x0Du||ah==0x10u||ah==0x11u) {bb622_hd_result(c,0u,0u);return true;}
     if(ah==0x01u) {bb622_hd_result(c,bb622_hd_last_error,0u);return true;}
     if(ah==0x08u) {
-        /* Max CHS 64/15/63, DL=1 fixed disk. */
-        c->r[MD_X86_CX]=0x403Fu;
+        /* Max CHS 255/15/63, DL=1 fixed disk. */
+        c->r[MD_X86_CX]=0xFF3Fu;
         c->r[MD_X86_DX]=0x0F01u;
         bb622_hd_result(c,0u,0u);
         return true;
     }
     if(ah==0x15u){
-        /* Fixed disk type 03h; total 65520 sectors as CX:DX. */
+        /* Fixed disk type 03h; total 258048 sectors as CX:DX. */
         uint16_t fl=md_x86_flags(c);
         c->r[MD_X86_AX]=0x0300u;
-        c->r[MD_X86_CX]=0u;
-        c->r[MD_X86_DX]=0xFFF0u;
+        c->r[MD_X86_CX]=3u;
+        c->r[MD_X86_DX]=0xF000u;
         md_x86_set_flags(c,(uint16_t)(fl&~MD_X86_FLAG_CF));
         return true;
     }
@@ -75,11 +75,11 @@ static bool BB622_FLASH bb622_hd_int13(MdRuntime *rt)
     cyl=(uint32_t)(cx>>8)|(((uint32_t)cx&0xC0u)<<2);
     sec=(uint32_t)cx&0x3Fu;
     head=(uint32_t)(dx>>8);
-    if(!n||cyl>=65u||head>=16u||!sec||sec>63u){
+    if(!n||cyl>=256u||head>=16u||!sec||sec>63u){
         bb622_hd_v2_fail(rt,"invalid-chs",ah,n,cx,dx,0u,0x04u,0u);return true;
     }
     lba=(cyl*16u+head)*63u+(sec-1u);
-    if(lba+n>65520u){bb622_hd_v2_fail(rt,"end-of-image",ah,n,cx,dx,lba,0x04u,0u);return true;}
+    if(lba+n>258048u){bb622_hd_v2_fail(rt,"end-of-image",ah,n,cx,dx,lba,0x04u,0u);return true;}
     if((uint32_t)c->r[MD_X86_BX]+(uint32_t)n*512u>65536u){
         bb622_hd_v2_fail(rt,"64k-dma-boundary",ah,n,cx,dx,lba,0x09u,0u);return true;
     }

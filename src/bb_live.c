@@ -14,11 +14,15 @@
  *  - Slices: on the RP2350 a 1 ms repeating timer sets cpu.irq; on hosts a
  *    dispatch limit bounds each slice.
  */
+#include "hardware/structs/xip_ctrl.h"   /* BB386_PJ_XIP_V1 */
+#include "hardware/structs/timer.h"
 #include "bb_live.h"
 #include "bb_vga.h"
 #include "bb_vga.c"
 #include "bb_pit.h"
 #include "bb_irq.h"
+#include "bb_irq0_burst.h" /* BB622_IRQ0_BURST_DIAG_V1 */
+#include "bb_irq0_cadence.h" /* BB622_IRQ0_CADENCE_DIAG_V1 */
 #if defined(BLITZBUS_LCD_CONSOLE) && BLITZBUS_LCD_CONSOLE
 #include "bb_lcd_console.h"
 #endif
@@ -196,7 +200,15 @@ static bool slice_cb(struct repeating_timer *t) { (void)t; C.irq |= 1u; return t
 B86_HOT static void to_b86(void)
 {
     MdX86 *m = &R->cpu;
-    for (unsigned i = 0; i < 8u; ++i) C.r[i] = m->r[i];
+    /* BB386_PM_STATE_V1: in protected mode microDOS's CS:IP, segments and
+       flags are a stale 16-bit view of selectors and a 32-bit EIP (copying
+       them back truncated EIP to 16 bits every slice), so nothing comes back. */
+    if (C.model >= B86_CPU_386 && (C.msw & 1u)) return;
+    /* BB386_GPR_HIGH_V1: retain 386 high halves across MdX86 slice handoff. */
+    for (unsigned i = 0; i < 8u; ++i) {
+        if (C.model >= B86_CPU_386) C.r[i] = (C.r[i] & 0xFFFF0000u) | m->r[i];
+        else C.r[i] = m->r[i];
+    }
     b86_set_seg(&C, B86_ES, m->es);
     b86_set_seg(&C, B86_CS, m->cs);
     b86_set_seg(&C, B86_SS, m->ss);
@@ -662,6 +674,10 @@ static void bb_v33_jit_line(void) {
         (unsigned long long)(s->evictions-prev.evictions),(unsigned long long)(s->evicted_blocks-prev.evicted_blocks),
         (unsigned long long)(s->unchains-prev.unchains),
         (unsigned long long)(s->limit_retries-prev.limit_retries));
+    if (C.model >= B86_CPU_386) {          /* blitz86 r56: 386 forms still stepped by the interpreter */
+        char top[256];
+        if (b86_jit_386_top(J, top, (int)sizeof top, 12) > 0) printf("[bb-386-steps] %s\n", top);
+    }
 #if defined(BB_MISS_PROFILE) && BB_MISS_PROFILE
     /* v59: where the cache misses come from (blitz86 -DB86_MPROF). "code" is
        generated code plus the dispatcher: the native window minus the
@@ -722,7 +738,12 @@ static void bb_v24_report(void) {
     printf("[bb-v51-stack] core0 peak=%lu of %lu bytes\n", (unsigned long)bb_v51_stack_peak(),
            (unsigned long)((uintptr_t)__StackTop - (uintptr_t)__StackBottom));
 #endif
-    if(!R||!bb_video_seen)return;
+    if(!R||!bb_video_seen){
+        /* blitz86 r57: DOS 6.22 text mode never sets bb_video_seen; still
+           show the JIT line ([bb-jit] + [bb-386-steps]) on Ctrl+]. */
+        if(R&&J)bb_v33_jit_line();
+        return;
+    }
     uint64_t elapsed=bb_now_us()-bb_v24_start_us;
     printf("[bb-v24] PROFILE wall-ms=%llu jit-calls=%llu jit-zero=%llu zero-trap=%llu jit-insns=%llu jit-ms=%llu interp-calls=%llu interp-insns=%llu interp-ms=%llu lcd-tick-calls=%llu lcd-tick-ms=%llu hash-calls=%llu hash-ms=%llu bda-tick-start=%lu bda-tick-now=%lu\n",
        (unsigned long long)(elapsed/1000u),(unsigned long long)bb_v24_jit_calls,
@@ -763,12 +784,28 @@ static uint32_t bb_v24_bda_tick(void) {
            ((uint32_t)m[0x46e]<<16) | ((uint32_t)m[0x46f]<<24);
 }
 
+/* BB622_BDA_DOSCLK_V2_DECL */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+extern bool bb_sd_dos622_active(void);
+#endif
 /* v25: real-time BIOS tick maintenance and LCD refresh pacing. */
+/* BB622_BDA_DOSCLK_V1: DOS text mode must not depend on VGA mode-13 setup. */
+static uint64_t bb622_bda_epoch_us;
 static void bb_v25_bios_time(void) {
-    if (!R || !bb_video_seen || !bb_v24_start_us) return;
+    if (!R) return;
+    const uint64_t now=bb_now_us();
+    uint64_t epoch=bb_v24_start_us;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if (bb_sd_dos622_active()) {
+        if (!bb622_bda_epoch_us) bb622_bda_epoch_us=now;
+        epoch=bb622_bda_epoch_us;
+    } else
+#endif
+    if (!bb_video_seen || !bb_v24_start_us) return;
+    if (now<epoch) return;
     /* 18.2065Hz BIOS tick from monotonic host time, independent of guest
        execution throughput. 54925 microseconds is the rounded PC tick. */
-    uint64_t elapsed = bb_now_us() - bb_v24_start_us;
+    uint64_t elapsed = now - epoch;
     uint32_t ticks = (uint32_t)(elapsed / 54925ull);
     if (ticks >= 0x1800b0u) ticks %= 0x1800b0u;
     uint8_t *m = R->cpu.memory;
@@ -796,6 +833,7 @@ static uint8_t bb_v23_scan(unsigned c) {
     if(c==' ')return 0x39;
     return 0u;
 }
+static void bb386_kbd_push(uint8_t scan);   /* BB386_PMKBD_V1 */
 static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     if(c==10u)c=13u;
     if(c==127u)c=8u;
@@ -808,6 +846,7 @@ static void bb_v23_enqueue_ascii(uint8_t *m,unsigned c) {
     bb_v22_write_word(m,0x400u+tail,(uint16_t)(((uint16_t)bb_v23_scan(c)<<8)|c));
     bb_v22_write_word(m,0x41cu,next);
     ++bb_v23_keys;
+    bb386_kbd_push(bb_v23_scan(c));   /* BB386_PMKBD_V1 */
     printf("[bb-v23] KEY ascii=%02X scan=%02X queued=%lu\n",c,bb_v23_scan(c),(unsigned long)bb_v23_keys);
 }
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -857,6 +896,7 @@ static void bb622_vt_scancode(uint8_t *m,uint8_t scan) {
     bb_v22_write_word(m,0x400u+t,(uint16_t)((uint16_t)scan<<8));
     bb_v22_write_word(m,0x41cu,next);
     ++bb_v23_keys;
+    bb386_kbd_push(scan);   /* BB386_PMKBD_V1 */
     if(bb622_vt_logged++<32u) {
         printf("[bb622-vtkey] scan=%02X AX=%04X queued=%lu\n",
             (unsigned)scan,(unsigned)(scan<<8),(unsigned long)bb_v23_keys);
@@ -969,6 +1009,98 @@ static uint64_t bb622_irq0_trial_started_us;
 static uint64_t bb622_irq0_trial_last_report_us;
 static uint64_t bb622_irq0_trial_if0_initial;
 static uint64_t bb622_irq0_trial_masked_initial;
+static Bb622IrqBurst bb622_irq0_burst; /* Ctrl+K bounded diagnostic */
+static Bb622IrqCadence bb622_irq0_cadence; /* opt-in, auto-off */
+/* BB622_IRQ0_REASON_DIAG_V1: diagnostics only, no hardware state writes.
+ * Only called with Ctrl+U/Ctrl+K explicitly armed and rate-limited to 1 Hz.
+ * Report why bb_irq36_dispatch() would refuse IRQ0 on this guest boundary.
+ */
+static uint64_t bb622_irq0_reason_last_us;
+#include "bb_irq0_postdiag.h" /* BB622_IRQ0_POSTDIAG_V1 */
+/* BB622_IRQ0_JITTRACE_V1: diagnostic-only, bounded JIT dispatch tracing.
+ * Does not change PIC/PIT, guest interrupts, CPU ABI, or 286 instruction semantics.
+ * Small JIT dispatch budget is temporary and only after explicit Ctrl+U.
+ */
+#include "bb_irq0_steptrace.h" /* BB622_IRQ0_STEPTRACE_V1 */
+static uint8_t bb622_jittrace_remaining;
+static uint64_t bb622_jittrace_started;
+static void bb622_jittrace_dump(const char *phase, int rc) {
+    const uint32_t cs=(uint16_t)C.seg[B86_CS], ip=(uint16_t)C.ip;
+    const uint32_t ss=(uint16_t)C.seg[B86_SS], sp=(uint16_t)C.r[B86_SP];
+    const uint32_t pc=((cs<<4)+ip)&C.amask;
+    const uint32_t sa=((ss<<4)+sp)&C.amask;
+    uint8_t op[8]={0}, stk[8]={0};
+    if(pc<=B86_MEM_BYTES-8u) for(unsigned i=0;i<8u;i++)op[i]=*b86_host(&C,pc+i);
+    if(sa<=B86_MEM_BYTES-8u) for(unsigned i=0;i<8u;i++)stk[i]=*b86_host(&C,sa+i);
+    printf("[bb622-jittrace] %s remain=%u rc=%d retired=%lu "
+           "CS:IP=%04X:%04X SS:SP=%04X:%04X FLAGSraw=%04X AX=%04X BX=%04X DX=%04X "
+           "IRR=%02X IMR=%02X ISR=%02X EOI=%llu "
+           "PC=%02X%02X%02X%02X%02X%02X%02X%02X "
+           "STACK=%02X%02X%02X%02X%02X%02X%02X%02X\n",
+           phase,(unsigned)bb622_jittrace_remaining,rc,(unsigned long)C.icnt,
+           (unsigned)cs,(unsigned)ip,(unsigned)ss,(unsigned)sp,
+           (unsigned)(C.flags&0xffffu),(unsigned)(uint16_t)C.r[B86_AX],
+           (unsigned)(uint16_t)C.r[B86_BX],(unsigned)(uint16_t)C.r[B86_DX],
+           (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+           (unsigned long long)bb_irq36.eois,
+           (unsigned)op[0],(unsigned)op[1],(unsigned)op[2],(unsigned)op[3],
+           (unsigned)op[4],(unsigned)op[5],(unsigned)op[6],(unsigned)op[7],
+           (unsigned)stk[0],(unsigned)stk[1],(unsigned)stk[2],(unsigned)stk[3],
+           (unsigned)stk[4],(unsigned)stk[5],(unsigned)stk[6],(unsigned)stk[7]);
+    fflush(stdout);
+}
+static void bb622_jittrace_arm(void) {
+    bb622_jittrace_remaining=64u;
+    bb622_jittrace_started=bb_now_us();
+    printf("[bb622-jittrace] ARMED dispatches=64 budget=1 (diagnostic-only)\n");
+    fflush(stdout);
+}
+static int bb622_jittrace_active(void) {
+    if(!bb622_jittrace_remaining) return 0;
+    if(bb_now_us()-bb622_jittrace_started>8000000ull) {
+        bb622_jittrace_remaining=0;
+        printf("[bb622-jittrace] END reason=timeout\n");fflush(stdout);
+        return 0;
+    }
+    return 1;
+}
+static void bb622_irq0_reason_diag(MdRuntime *rt, uint64_t now, const char *phase){
+    if(!rt || !rt->cpu.memory) return;
+    if(bb622_irq0_reason_last_us && now >= bb622_irq0_reason_last_us &&
+       now - bb622_irq0_reason_last_us < 1000000ull) return;
+    bb622_irq0_reason_last_us = now;
+    const uint8_t vec = bb_irq36.base;
+    const uint32_t a = (uint32_t)vec * 4u;
+    const uint8_t *m = rt->cpu.memory;
+    const uint16_t off = (uint16_t)((uint16_t)m[a] | ((uint16_t)m[a+1u]<<8));
+    const uint16_t seg = (uint16_t)((uint16_t)m[a+2u] | ((uint16_t)m[a+3u]<<8));
+    const uint16_t flags = md_x86_flags(&rt->cpu);
+    const char *why = !(bb_irq36.irr & 1u) ? "NO_PENDING_IRR" :
+          (bb_irq36.imr & 1u) ? "IRQ0_MASKED" :
+          (bb_irq36.isr & 1u) ? "IRQ0_IN_SERVICE" :
+          !(flags & 0x0200u) ? "IF_CLEAR" :
+          !(off | seg) ? "NULL_IVT_TARGET" : "READY_CHECK_DISPATCH";
+    const uint32_t tick = (uint32_t)m[0x46cu] |
+                          ((uint32_t)m[0x46du]<<8) |
+                          ((uint32_t)m[0x46eu]<<16) |
+                          ((uint32_t)m[0x46fu]<<24);
+    printf("[bb622-irqdiag] %s why=%s base=%02X ivt[%02X]=%04X:%04X "
+           "raw=%02X,%02X,%02X,%02X irr=%02X imr=%02X isr=%02X if=%u "
+           "flags=%04X cs:ip=%04X:%04X ss:sp=%04X:%04X bda=%lu "
+           "edges=%llu sent=%llu eois=%llu trial=%u burst=%u\n",
+           phase,why,(unsigned)bb_irq36.base,(unsigned)vec,
+           (unsigned)seg,(unsigned)off,
+           (unsigned)m[a],(unsigned)m[a+1u],(unsigned)m[a+2u],(unsigned)m[a+3u],
+           (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+           (unsigned)((flags & 0x0200u)!=0), (unsigned)flags,
+           (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip,(unsigned)rt->cpu.ss,
+           (unsigned)rt->cpu.r[B86_SP], (unsigned long)tick,
+           (unsigned long long)bb_irq36.edges,
+           (unsigned long long)bb_irq36.delivered,
+           (unsigned long long)bb_irq36.eois,
+           (unsigned)bb622_irq0_trial_armed,(unsigned)bb622_irq0_burst.active);
+    fflush(stdout);
+}
 static void bb622_swap_receive(unsigned ch)
 {
     const uint64_t now=bb_now_us();
@@ -1020,6 +1152,8 @@ static void bb_v23_poll_input(void) {
     }
     /* BB622_IRQ0_TRIAL_V1: Ctrl+U arms ONE IRQ0, never guest keyboard input. */
     if(bb_sd_dos622_active() && c==0x15){
+        if(bb622_irq0_cadence.active){puts("[bb622-cadence] Ctrl+U blocked during cadence; Ctrl+L cancels");return;}
+        bb622_burst_reset(&bb622_irq0_burst); /* Ctrl+U always cancels burst */
         bb622_irq0_trial_armed=1u;
         bb622_irq0_trial_started_us=bb_now_us();
         bb622_irq0_trial_last_report_us=bb622_irq0_trial_started_us;
@@ -1028,6 +1162,50 @@ static void bb_v23_poll_input(void) {
         printf("[bb622-irqtrial] ARMED one-shot guest IRQ0 (max=1 timeout=8s) irr=%02X imr=%02X isr=%02X if=%u\n",
                (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
                (unsigned)((md_x86_flags(&R->cpu)&0x0200u)!=0));
+        fflush(stdout);
+        return;
+    }
+    /* BB622_IRQ0_CADENCE_DIAG_V1: Ctrl+L starts/stops 10 seconds of REAL PIT IRQ0.
+     * No continuous delivery on boot, and no simultaneous Ctrl+U/Ctrl+K tests.
+     */
+    if(bb_sd_dos622_active() && c==0x0Cu){
+        if(bb622_irq0_cadence.active){
+            printf("[bb622-cadence] CANCEL delivered=%llu eois=%llu bda=%lu isr=%02X\n",
+                (unsigned long long)(bb_irq36.delivered-bb622_irq0_cadence.start_delivered),
+                (unsigned long long)(bb_irq36.eois-bb622_irq0_cadence.start_eois),
+                (unsigned long)bb_v24_bda_tick(),(unsigned)bb_irq36.isr);
+            bb622_cadence_reset(&bb622_irq0_cadence);
+        }else if(bb622_irq0_trial_armed || bb622_irq0_burst.active || (bb_irq36.isr&1u)){
+            printf("[bb622-cadence] REFUSE other diagnostic or IRQ0 in service\n");
+        }else{
+            const uint64_t now=bb_now_us();
+            bb622_cadence_arm(&bb622_irq0_cadence,now,bb_irq36.edges,
+                bb_irq36.delivered,bb_irq36.eois,bb_irq36.coalesced,bb_v24_bda_tick());
+            printf("[bb622-cadence] ARMED window=10s PIT-paced (nominal 18.2Hz) bda=%lu edges=%llu eois=%llu\n",
+                (unsigned long)bb622_irq0_cadence.start_bda,
+                (unsigned long long)bb622_irq0_cadence.start_edges,
+                (unsigned long long)bb622_irq0_cadence.start_eois);
+        }
+        fflush(stdout);
+        return;
+    }
+    /* BB622_IRQ0_BURST_DIAG_V1: Ctrl+K toggles the bounded eight-event test.
+     * Never forwarded into DOS, never silently enables continuous IRQ0.
+     */
+    if(bb_sd_dos622_active() && c==0x0B){
+        if(bb622_irq0_cadence.active){puts("[bb622-cadence] Ctrl+K blocked during cadence; Ctrl+L cancels");return;}
+        if(bb622_irq0_burst.active){
+            printf("[bb622-irqburst] CANCEL manual delivered=%u acknowledged=%u irr=%02X isr=%02X\n",
+                (unsigned)bb622_irq0_burst.delivered,(unsigned)bb622_irq0_burst.completed,
+                (unsigned)bb_irq36.irr,(unsigned)bb_irq36.isr);
+            bb622_burst_reset(&bb622_irq0_burst);
+        }else{
+            bb622_irq0_trial_armed=0u;
+            bb622_burst_arm(&bb622_irq0_burst,bb_now_us(),bb_irq36.eois);
+            printf("[bb622-irqburst] ARMED max=%u total=20s ack=1.5s imr=%02X isr=%02X IF=%u\n",
+                (unsigned)BB622_IRQ_BURST_MAX,(unsigned)bb_irq36.imr,
+                (unsigned)bb_irq36.isr,(unsigned)((md_x86_flags(&R->cpu)&0x200u)!=0));
+        }
         fflush(stdout);
         return;
     }
@@ -1558,9 +1736,36 @@ static void bb_v61_port(uint16_t port, uint8_t v)
         bb_v61_last_frame_us = 0; bb_v61_a000_bytes = 0; bb_v61_render_reported = 0;
     }
 }
+/* BB386_PMKBD_V1: scancode queue, port 60h/64h and IRQ1 in protected mode. */
+#ifndef BB386_PM_KBD
+#define BB386_PM_KBD 1
+#endif
+static uint8_t bb386_kq[64], bb386_kq_head, bb386_kq_tail, bb386_k60, bb386_kobf;
+static uint64_t bb386_kbd_pm_us, bb386_k_ready_us;
+static unsigned long bb386_kbd_irqs;
+static void bb386_kq_put(uint8_t v)
+{
+    const uint8_t next = (uint8_t)((bb386_kq_tail + 1u) & 63u);
+    if (next != bb386_kq_head) { bb386_kq[bb386_kq_tail] = v; bb386_kq_tail = next; }
+}
+static void bb386_kbd_push(uint8_t scan)
+{
+    if (!BB386_PM_KBD || !scan || C.model < B86_CPU_386) return;
+    if (!bb386_kbd_pm_us || bb_now_us() - bb386_kbd_pm_us > 2000000u) return;   /* DOS: BIOS buffer only */
+    bb386_kq_put(scan);
+    bb386_kq_put((uint8_t)(scan | 0x80u));
+}
+static int bb386_kbd_port_in(uint16_t port, uint8_t *v)
+{
+    if (!BB386_PM_KBD || !bb386_kbd_pm_us) return 0;
+    if (port == 0x60u) { *v = bb386_k60; bb386_kobf = 0u; return 1; }
+    if (port == 0x64u) { *v = (uint8_t)(0x1Cu | bb386_kobf); return 1; }
+    return 0;
+}
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     uint8_t result;
+    if(bb386_kbd_port_in(port,&result))return result;   /* BB386_PMKBD_V1 */
     if(bb_irq36_in(port,&result))return result;
     if(bb_pit_in(port,&result,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return result;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -1688,7 +1893,8 @@ static int start(MdRuntime *rt)
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
     bb622_pic_pending_probe_enabled=0u; /* BB622_PIC_PENDING_V1: OFF on cold boot */
-    bb622_irq0_trial_armed=0u; /* BB622_IRQ0_TRIAL_V1: OFF on cold boot */
+    bb622_irq0_trial_armed=0u; /* BB622_IRQ0_TRIAL_V1: OFF on cold boot */ bb622_burst_reset(&bb622_irq0_burst); /* BURST OFF on cold boot */
+    bb622_cadence_reset(&bb622_irq0_cadence); /* cadence OFF on boot */
     printf("[bb622-diag] 02 before.b86_init\n"); fflush(stdout);
     b86_init(&C, rt->cpu.memory);
     printf("[bb622-diag] 03 after.b86_init\n"); fflush(stdout);
@@ -1703,7 +1909,11 @@ static int start(MdRuntime *rt)
 #endif
     printf("[bb622-diag] 06 before.cpu_model\n"); fflush(stdout);
     C.model = BB_CPU_MODEL;            /* v63: 0 = 8086 (exact), 1 = 80186 instruction set */
-    printf("[bb-v63-cpu] blitz86 CPU model %s\n", C.model >= 2 ? "80286 (real mode)" : C.model ? "80186" : "8086");
+    #if BB_CPU_MODEL == 3
+    printf("[bb-v63-cpu] blitz86 CPU model 80386 (real mode JIT; protected mode interpreter)\n");
+    #else
+    printf("[bb-v63-cpu] blitz86 CPU model %s\n", C.model >= B86_CPU_386 ? "80386 (real mode)" : C.model >= B86_CPU_286 ? "80286 (real mode)" : C.model ? "80186" : "8086");
+    #endif /* B86_LIVE386_ENABLE_V3 */
     C.int_hook = hook_int;
     C.code_hook = code_hook;
     C.in8 = hook_in;
@@ -1714,6 +1924,52 @@ static int start(MdRuntime *rt)
 #endif
     printf("[bb622-diag] 07 before.jit_create\n"); fflush(stdout);
     J = b86_jit_create_ex(&C, bb_code, BB_CODE_BYTES, bb_hot, sizeof bb_hot);
+
+#if defined(B86_PJ) && B86_PJ   /* BB386_PJ_V1: native protected-mode translator */
+    {
+#ifndef BB_PJ_PSRAM
+#define BB_PJ_PSRAM 1                       /* code buffer in PSRAM (runs through the XIP cache) */
+#endif
+#if BB_PJ_PSRAM && defined(__uninitialized_psram)
+#ifndef BB_PJ_CODE_KB
+#define BB_PJ_CODE_KB 512
+#endif
+        static uint8_t __uninitialized_psram("zzz_bb_pj_code") __attribute__((aligned(64))) bb_pj_code[BB_PJ_CODE_KB * 1024u];
+        const char *bb_pj_where = "PSRAM";
+#else
+#ifndef BB_PJ_CODE_KB
+#define BB_PJ_CODE_KB 64
+#endif
+        static uint8_t bb_pj_code[BB_PJ_CODE_KB * 1024u] __attribute__((aligned(64)));
+        const char *bb_pj_where = "SRAM";
+#endif
+        static uint64_t bb_pj_state[8192u / 8u];       /* SRAM: hash tables are probed on every block */
+        if (b86_pj_attach(&C, bb_pj_state, sizeof bb_pj_state, bb_pj_code, sizeof bb_pj_code))
+            printf("[bb386-pj] native PM translator: %u KiB code in %s at %p, state %u B\n",
+                   (unsigned)BB_PJ_CODE_KB, bb_pj_where, (void *)bb_pj_code, (unsigned)b86_pj_state_bytes());
+        else
+            printf("[bb386-pj] attach FAILED: state needs %u B\n", (unsigned)b86_pj_state_bytes());
+        fflush(stdout);
+        {   /* BB386_PJ_XIP_V1 */
+            extern void b86_pj_set_xip_counters(B86Cpu *c, const volatile uint32_t *acc, const volatile uint32_t *hit, const volatile uint32_t *us);
+#if defined(timer0_hw)
+            b86_pj_set_xip_counters(&C, &xip_ctrl_hw->ctr_acc, &xip_ctrl_hw->ctr_hit, &timer0_hw->timerawl);
+#else
+            b86_pj_set_xip_counters(&C, &xip_ctrl_hw->ctr_acc, &xip_ctrl_hw->ctr_hit, &timer_hw->timerawl);
+#endif
+            printf("[bb386-pj] XIP miss split on\n");
+        }
+#if defined(BB_PJ_HOT_KB) && BB_PJ_HOT_KB > 0   /* BB386_PJ_HOT_V1 */
+        {
+            extern int b86_pj_attach_hot(B86Cpu *c, void *buf, size_t bytes);
+            static uint8_t bb_pj_hot[BB_PJ_HOT_KB * 1024u] __attribute__((aligned(64)));   /* SRAM */
+            const int ok = b86_pj_attach_hot(&C, bb_pj_hot, sizeof bb_pj_hot);
+            printf("[bb386-pj] SRAM hot tier: %u KiB at %p %s\n", (unsigned)BB_PJ_HOT_KB, (void *)bb_pj_hot, ok ? "on" : "FAILED");
+            fflush(stdout);
+        }
+#endif
+    }
+#endif
     printf("[bb622-diag] 08 after.jit_create\n"); fflush(stdout);
     if (J == NULL) { failed = 1; fail_reason = "jit-create"; return 0; }
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -1943,6 +2199,475 @@ static void bb_time_freeze(uint64_t us)
     for (unsigned i = 0; i < 3u; ++i) bb_pit.c[i].epoch_us += us;   /* PIT counters */
     bb_irq36.anchor_us = bb_pit.c[0].epoch_us;   /* keep IRQ0's period count */
 }
+/* BB386_PM_STATE_V1: protected-mode bookkeeping and the stop dump. */
+static inline int bb386_pm(void) { return C.model >= B86_CPU_386 && (C.msw & 1u) != 0; }
+static unsigned long bb386_pm_slices;
+static int bb386_pm_was;
+static const char *bb386_rc_name(int rc)
+{
+    switch (rc) {
+    case B86_OK: return "ok"; case B86_HALT: return "halt"; case B86_EXIT: return "exit";
+    case B86_BUDGET: return "budget"; case B86_TRAP: return "trap";
+    case B86_UNSUPPORTED: return "unsupported"; case B86_SHUTDOWN: return "shutdown";
+    default: return "?";
+    }
+}
+static uint32_t bb386_cs_linear(void)
+{
+    if (C.msw & 1u) return C.pm386.seg[B86_CS].base + C.ip;
+    return ((uint32_t)(uint16_t)C.seg[B86_CS] << 4) + (C.ip & 0xFFFFu);
+}
+static void bb386_pm_regs(const char *tag)
+{
+    const B86PM1Cache *s = C.pm386.seg;
+    printf("[bb386-pm] %s cr0=%04X cs=%04X eip=%08lX cs.base=%08lX cs.limit=%08lX cs.acc=%02X cs.flg=%02X\n",
+           tag, (unsigned)C.msw, (unsigned)s[B86_CS].selector, (unsigned long)C.ip,
+           (unsigned long)s[B86_CS].base, (unsigned long)s[B86_CS].limit,
+           (unsigned)s[B86_CS].access, (unsigned)s[B86_CS].flags);
+    printf("[bb386-pm]   eax=%08lX ebx=%08lX ecx=%08lX edx=%08lX esi=%08lX edi=%08lX ebp=%08lX esp=%08lX flags=%04X\n",
+           (unsigned long)C.r[B86_AX], (unsigned long)C.r[B86_BX], (unsigned long)C.r[B86_CX],
+           (unsigned long)C.r[B86_DX], (unsigned long)C.r[B86_SI], (unsigned long)C.r[B86_DI],
+           (unsigned long)C.r[B86_BP], (unsigned long)C.r[B86_SP], (unsigned)b86_get_flags(&C));
+    printf("[bb386-pm]   ss=%04X/%08lX ds=%04X/%08lX es=%04X/%08lX fs=%04X/%08lX gs=%04X/%08lX gdt=%08lX idt=%08lX\n",
+           (unsigned)s[B86_SS].selector, (unsigned long)s[B86_SS].base,
+           (unsigned)s[B86_DS].selector, (unsigned long)s[B86_DS].base,
+           (unsigned)s[B86_ES].selector, (unsigned long)s[B86_ES].base,
+           (unsigned)s[B86_FS].selector, (unsigned long)s[B86_FS].base,
+           (unsigned)s[B86_GS].selector, (unsigned long)s[B86_GS].base,
+           (unsigned long)C.gdt_base, (unsigned long)C.idt_base);
+    uint32_t lin = bb386_cs_linear();
+    {   /* BB386_PGSTAT_V1 */
+        extern unsigned long b86_pg_stat_faults, b86_pg_stat_tswitch, b86_pg_stat_walks, b86_pg_stat_flush;
+        printf("[bb386-pm]   pg=%u cr3=%08lX cr2=%08lX pf=%lu tsw=%lu walks=%lu flush=%lu icount=%llu pic irr=%02X isr=%02X imr=%02X tr=%04X\n",
+               (unsigned)C.pg, (unsigned long)C.cr3, (unsigned long)C.cr2,
+               b86_pg_stat_faults, b86_pg_stat_tswitch, b86_pg_stat_walks, b86_pg_stat_flush,
+               (unsigned long long)C.icount, (unsigned)bb_irq36.irr, (unsigned)bb_irq36.isr,
+               (unsigned)bb_irq36.imr, (unsigned)C.tr_sel);
+    }
+#if defined(B86_PJ) && B86_PJ   /* BB386_PJ_V1 */
+    { unsigned long pj[8], so[256]; int k, q, best;
+      b86_pj_stats(&C, pj); b86_pj_stop_ops(&C, so);
+      { /* BB386_PJ_CHURN_V1 */
+        extern void b86_pj_flush_causes(const B86Cpu *c, unsigned long out[10]);
+        static uint64_t sp_t, sp_i; static unsigned long sp_blocks;
+        unsigned long fc[10];
+        const uint64_t now = time_us_64(), ic = (uint64_t)C.icount;
+        const double dt_ms = sp_t ? (double)(now - sp_t) / 1000.0 : 0.0;
+        b86_pj_stats(&C, pj); b86_pj_flush_causes(&C, fc);
+        printf("[bb386-speed] pm-mips=%.2f pm-insns=%llu wall-ms=%.0f\n",
+               dt_ms > 0.0 ? (double)(ic - sp_i) / (dt_ms * 1000.0) : 0.0,
+               (unsigned long long)(ic - sp_i), dt_ms);
+        printf("[bb386-churn] flushes=%lu smc=%lu full=%lu pm16ctx=%lu codepage=%lu smc-stores=%lu killed=%lu refinds=%lu evictions=%lu unlinks=%lu new-blocks=%lu\n",
+               fc[0], fc[1], fc[2], fc[3], fc[4], fc[5], fc[6], fc[7], fc[8], fc[9], pj[0] - sp_blocks);
+        sp_t = now; sp_i = ic; sp_blocks = pj[0];
+        { /* BB386_PJ_XIP_V1 */
+          extern void b86_pj_xip_split(const B86Cpu *c, unsigned long out[12]);
+          static unsigned long xp[12]; static uint64_t xt;
+          unsigned long xs[12], d[12]; unsigned k;
+          const uint64_t xn = time_us_64(); const double wall = xt ? (double)(xn - xt) : 0.0;
+          b86_pj_xip_split(&C, xs);
+          for (k = 0; k < 12u; ++k) { d[k] = xs[k] - xp[k]; xp[k] = xs[k]; }
+          xt = xn;
+          if (wall > 0.0)
+            printf("[bb386-xip] sram runs=%lu insns=%lu mips=%.2f miss/insn=%.3f time=%.1f%% | psram runs=%lu insns=%lu mips=%.2f miss/insn=%.3f time=%.1f%% | gaps n=%lu miss=%lu miss/us=%.2f time=%.1f%% | dropped=%lu\n",
+                   d[0], d[1], d[3] ? (double)d[1] / (double)d[3] : 0.0, d[1] ? (double)d[2] / (double)d[1] : 0.0, 100.0 * (double)d[3] / wall,
+                   d[4], d[5], d[7] ? (double)d[5] / (double)d[7] : 0.0, d[5] ? (double)d[6] / (double)d[5] : 0.0, 100.0 * (double)d[7] / wall,
+                   d[8], d[9], d[10] ? (double)d[9] / (double)d[10] : 0.0, 100.0 * (double)d[10] / wall, d[11]);
+        }
+#if defined(BB_PJ_HOT_KB) && BB_PJ_HOT_KB > 0   /* BB386_PJ_HOT_V1 */
+        { extern void b86_pj_hot_stats(const B86Cpu *c, unsigned long out[6]); unsigned long hs[6];
+          b86_pj_hot_stats(&C, hs);
+          printf("[bb386-hot] promotions=%lu resets=%lu refused=%lu used=%lu/%lu trampolines=%lu\n", hs[0], hs[1], hs[2], hs[3], hs[4], hs[5]); }
+#endif
+      }
+      printf("[bb386-pj]   blocks=%lu flush(smc,full)=%lu,%lu runs=%lu native=%lu (%.1f/run) mem-exits=%lu declined=%lu code=%lu/%lu stops:",
+             pj[0], pj[1] / 1000000ul, pj[1] % 1000000ul, pj[2], pj[3], pj[2] ? (double)pj[3] / (double)pj[2] : 0.0, pj[4], pj[5], pj[6], pj[7]);
+      for (k = 0; k < 8; ++k) { best = 0; for (q = 1; q < 256; ++q) if (so[q] > so[best]) best = q; if (!so[best]) break; printf(" %02X:%lu", best, so[best]); so[best] = 0; }
+      printf("\n"); }
+    { /* BB_PJ_REPNE_EFFICIENCY_V1: no effect on emulated state. */
+      extern void b86_pj_repne_stats(const B86Cpu *c, unsigned long out[6]);
+      unsigned long st[6];
+      b86_pj_repne_stats(&C, st);
+      printf("[bb386-repne] calls=%lu completed=%lu budget-yields=%lu memory-refusals=%lu comparisons=%lu page-spans=%lu\n",
+             st[0], st[1], st[2], st[3], st[4], st[5]);
+    }
+#endif
+#if defined(B86_PJ) && B86_PJ /* BB_PJ_C1_E3_66_V1 */
+    { extern uint64_t b86_pm_pj_guest_insns, b86_pm_c_guest_insns;
+      const uint64_t nat = b86_pm_pj_guest_insns, slow = b86_pm_c_guest_insns;
+      const uint64_t total = nat + slow;
+      printf("[bb386-coverage] pm-pj=%llu pm-c=%llu total=%llu native-pct=%.1f\n",
+             (unsigned long long)nat, (unsigned long long)slow,
+             (unsigned long long)total, total ? 100.0 * (double)nat / (double)total : 0.0);
+    }
+#endif
+#if defined(B86_PJ) && B86_PJ /* BB_PJ_TLB_0F_V1 */
+    {   unsigned long mm[8];
+        const unsigned long *stops;
+        /* BB_PJ_TLB_0F_COMPILEFIX_V1: functions implemented in blitz86/interp.c.
+         * bb_live.c is a separate translation unit and needs explicit prototypes. */
+        extern void b86_pj_mem_profile(const B86Cpu *c, unsigned long out[8]);
+        extern const unsigned long *b86_pj_0f_stop(const B86Cpu *c);
+        extern unsigned b86_pj_tlb_mode(void);
+        extern void b86_pj_es_stats(const B86Cpu *c, unsigned long out[4]);
+        extern void b86_pj_es_skip_stats(const B86Cpu *c, unsigned long out[3]);
+        extern unsigned long b86_pm_c_0f_exec[256];
+        /* BB_PJ_SHIFTD_GS_X87_V1: actual retired x87 fallback family. */
+        extern unsigned long b86_pm_c_x87_exec[8];
+        { unsigned x; unsigned long total=0;
+          for (x=0; x<8u; ++x) total += b86_pm_c_x87_exec[x];
+          printf("[bb386-x87] c-executed=%lu D8:%lu D9:%lu DA:%lu DB:%lu DC:%lu DD:%lu DE:%lu DF:%lu\n",
+                 total, b86_pm_c_x87_exec[0], b86_pm_c_x87_exec[1],
+                 b86_pm_c_x87_exec[2], b86_pm_c_x87_exec[3], b86_pm_c_x87_exec[4],
+                 b86_pm_c_x87_exec[5], b86_pm_c_x87_exec[6], b86_pm_c_x87_exec[7]);
+        }
+        b86_pj_mem_profile(&C, mm);
+        /* BB_PJ_ES_INDEPENDENT_V1: compact ES guard, no huge site table. */
+        { unsigned long es[4];
+          b86_pj_es_stats(&C, es);
+          printf("[bb386-es] mode=%lu mode-switches=%lu relaxed-entries=%lu guarded-exits=%lu\n",
+                 es[0], es[1], es[2], es[3]);
+          { unsigned long skip[3];
+            b86_pj_es_skip_stats(&C, skip);
+            printf("[bb386-es-skip] checks=%lu hits=%lu marks=%lu\n",
+                   skip[0], skip[1], skip[2]);
+          }
+        }
+        stops = b86_pj_0f_stop(&C);
+        printf("[bb386-mem] tlb-mode=%u calls=%lu paged=%lu hits=%lu walks=%lu refusals=%lu cross=%lu bounds=%lu writes=%lu\n",
+               b86_pj_tlb_mode(), mm[0], mm[1], mm[2], mm[3], mm[4], mm[5], mm[6], mm[7]);
+        { unsigned q, k, selected[8]; unsigned long sum = 0;
+          for (q = 0; q < 256u; ++q) sum += b86_pm_c_0f_exec[q];
+          printf("[bb386-0f] c-executed=%lu top:", sum);
+          for (k = 0; k < 8u; ++k) {
+              unsigned best = 0u; unsigned long top = 0u;
+              for (q = 0; q < 256u; ++q) {
+                  unsigned x, used = 0u;
+                  for (x = 0; x < k; ++x) if (selected[x] == q) { used = 1u; break; }
+                  if (!used && b86_pm_c_0f_exec[q] > top) { top = b86_pm_c_0f_exec[q]; best = q; }
+              }
+              if (!top) break;
+              selected[k] = best; printf(" %02X:%lu", best, top);
+          }
+          printf("\n");
+        }
+        if (stops) {
+          unsigned q, k, selected[8]; unsigned long sum = 0;
+          for (q = 0; q < 256u; ++q) sum += stops[q];
+          printf("[bb386-0f] translate-stops=%lu top:", sum);
+          for (k = 0; k < 8u; ++k) {
+              unsigned best = 0u; unsigned long top = 0u;
+              for (q = 0; q < 256u; ++q) {
+                  unsigned x, used = 0u;
+                  for (x = 0; x < k; ++x) if (selected[x] == q) { used = 1u; break; }
+                  if (!used && stops[q] > top) { top = stops[q]; best = q; }
+              }
+              if (!top) break;
+              selected[k] = best; printf(" %02X:%lu", best, top);
+          }
+          printf("\n");
+        }
+    }
+#endif
+    printf("[bb386-pm]   code@%08lX:", (unsigned long)lin);
+    for (uint32_t j = 0; j < 16u; ++j) {
+        if (lin + j < B86_RAM_BYTES) printf(" %02X", (unsigned)*b86_host(&C, lin + j));
+        else printf(" ??");
+    }
+    printf("\n");
+    fflush(stdout);
+}
+/* BB386_PMIRQ_V1: PIT IRQ0 through the guest IDT while CR0.PE=1. */
+#ifndef BB386_PM_IRQ0
+#define BB386_PM_IRQ0 1
+#endif
+static unsigned long bb386_pmirq_delivered, bb386_pmirq_blocked;
+/* BB386_PMKBD_V1 */
+static void bb386_kbd_poll(void)
+{
+    const uint64_t now = bb_now_us();
+    uint8_t *m = b86_host_phys(&C, 0u);   /* IVT page (honours B86_PAGED mappings) */
+    bb386_kbd_pm_us = now;
+    if (!BB386_PM_KBD) return;
+    if (!bb386_kobf && bb386_kq_head != bb386_kq_tail && now >= bb386_k_ready_us) {
+        bb386_k60 = bb386_kq[bb386_kq_head]; bb386_kq_head = (uint8_t)((bb386_kq_head + 1u) & 63u);
+        bb386_kobf = 1u; bb_irq36.irr |= 2u;
+        bb386_k_ready_us = now + 70000u;                 /* make/break spacing */
+    }
+    if (!(bb_irq36.irr & 2u) || (bb_irq36.imr & 2u) || (bb_irq36.isr & 3u)) return;
+    if (BB386_PM_IRQ0 && (bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u)) return;   /* IRQ0 first only when enabled */
+    if (!(m[0x24] | m[0x25] | m[0x26] | m[0x27])) {      /* null real-mode INT 09h: seed a safe one */
+        static const uint8_t stub[] = { 0x50, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF };
+        uint8_t *s = b86_host_phys(&C, 0xF01A0u);
+        for (unsigned i = 0; i < sizeof stub; ++i) s[i] = stub[i];
+        m[0x24] = 0xA0; m[0x25] = 0x01; m[0x26] = 0x00; m[0x27] = 0xF0;
+    }
+    if (!b86_irq(&C, (uint8_t)(bb_irq36.base + 1u))) return;
+    bb_irq36.irr &= (uint8_t)~2u;
+    if (!bb_irq36.auto_eoi) bb_irq36.isr |= 2u;
+    if (++bb386_kbd_irqs <= 8u || (bb386_kbd_irqs & (bb386_kbd_irqs - 1u)) == 0u) {
+        printf("[bb386-kbd] IRQ1 #%lu scancode %02X -> INT %02X in protected mode at %04X:%08lX\n",
+               bb386_kbd_irqs, (unsigned)bb386_k60, (unsigned)(bb_irq36.base + 1u),
+               (unsigned)(uint16_t)C.seg[B86_CS], (unsigned long)C.ip);
+        fflush(stdout);
+    }
+}
+static void bb386_pmirq_poll(void)
+{
+    if (C.model < B86_CPU_386 || !(C.msw & 1u)) return;
+    bb386_kbd_poll();                                         /* BB386_PMKBD_V1 */
+    if (!BB386_PM_IRQ0) return;  /* IRQ1 is independently enabled */
+    bb_irq36_schedule(bb_now_us());
+    if (!(bb_irq36.irr & 1u) || (bb_irq36.imr & 1u) || (bb_irq36.isr & 1u)) return;
+    if (!b86_irq(&C, bb_irq36.base)) { ++bb386_pmirq_blocked; return; }   /* IF=0 or mid-transition */
+    bb_irq36.irr &= (uint8_t)~1u;
+    if (!bb_irq36.auto_eoi) bb_irq36.isr |= 1u;
+    bb_irq36.delivered++;
+    ++bb386_pmirq_delivered;
+    if (bb386_pmirq_delivered <= 4u || (bb386_pmirq_delivered & (bb386_pmirq_delivered - 1u)) == 0u) {
+        printf("[bb386-irq] IRQ0 #%lu -> INT %02X in protected mode at %04X:%08lX pit-reload=%u (%lu Hz) blocked=%lu edges=%llu coalesced=%llu\n",
+               bb386_pmirq_delivered, (unsigned)bb_irq36.base, (unsigned)(uint16_t)C.seg[B86_CS],
+               (unsigned long)C.ip, (unsigned)(bb_pit.c[0].reload_raw ? bb_pit.c[0].reload_raw : 65536u),
+               (unsigned long)(1193182u / (bb_pit.c[0].reload_raw ? bb_pit.c[0].reload_raw : 65536u)),
+               bb386_pmirq_blocked, (unsigned long long)bb_irq36.edges, (unsigned long long)bb_irq36.coalesced);
+        fflush(stdout);
+    }
+}
+
+static void bb386_pm_track(int rc)
+{
+    const int pm = bb386_pm();
+    static unsigned long bb386_pm_entries;   /* BB386_QUIET_V1: log switches 1,2,4,8,... */
+    const int bb386_loud = bb386_pm_entries < 2u || !(bb386_pm_entries & (bb386_pm_entries - 1u));
+    if (pm && !bb386_pm_was) {
+        ++bb386_pm_entries;
+        if (bb386_pm_entries <= 2u || !(bb386_pm_entries & (bb386_pm_entries - 1u))) {
+            printf("[bb386-pm] ENTER protected mode #%lu (rc=%s retired=%lu)\n",
+                   bb386_pm_entries, bb386_rc_name(rc), (unsigned long)C.icnt);
+            bb386_pm_regs("enter");
+        }
+    } else if (!pm && bb386_pm_was && bb386_loud) {
+        printf("[bb386-pm] LEAVE protected mode #%lu -> real mode %04X:%04X after %lu PM slices\n",
+               bb386_pm_entries, (unsigned)C.seg[B86_CS], (unsigned)(C.ip & 0xFFFFu), bb386_pm_slices);
+        fflush(stdout);
+    }
+    bb386_pm_was = pm;
+    if (pm) {
+        ++bb386_pm_slices;
+        if (((bb386_pm_slices & (bb386_pm_slices - 1u)) == 0u && bb386_pm_slices >= 2u) ||
+            (bb386_pm_slices & 4095u) == 0u) {   /* BB386_PGSTAT_V1 */
+            char tag[40];
+            snprintf(tag, sizeof tag, "slice=%lu rc=%s", bb386_pm_slices, bb386_rc_name(rc));
+            bb386_pm_regs(tag);
+        }
+    }
+}
+static void bb386_pm_stop(MdRuntime *rt, int rc)
+{
+    char tag[48];
+    snprintf(tag, sizeof tag, "STOP rc=%s retired=0", bb386_rc_name(rc));
+    printf("\n");
+    bb386_pm_regs(tag);
+    printf("[bb386-pm] blitz86 made no progress; the 8086 fallback interpreter is not used for 386 %s\n",
+           (C.msw & 1u) ? "protected mode" : "shutdown");
+    fflush(stdout);
+    rt->fault_linear = bb386_cs_linear();
+    rt->fault_opcode = rt->fault_linear < B86_RAM_BYTES ? *b86_host(&C, rt->fault_linear) : 0u;
+    rt->stop_reason = MD_STOP_FAULT;
+}
+
+/* BB386_NO8086_BRIDGE_V12: fail closed instead of 386->8086 fallback. */
+/* A no-progress native dispatch may encounter a valid 386-only opcode.
+ * Retry exactly one instruction using blitz86's full 386 interpreter.
+ * Never retry after IRQ, a guest state change, unsupported/fault, a trap,
+ * or shutdown.  Normal native paths are unchanged. */
+static int bb386_v12_cold_miss(int rc)
+{
+    if (C.model < B86_CPU_386 || (C.msw & 1u) || C.shutdown386 ||
+        C.icnt != 0u || C.irq != 0u || rc != B86_BUDGET ||
+        C.seg[B86_CS] == C.trap_cs)
+        return rc;
+    int r = b86_step(&C);
+    if (r == B86_OK) {
+        ++C.icnt; /* mirror b86_386_rm0_run's 386 instruction count */
+        return B86_BUDGET;
+    }
+    return r; /* never silently hand a failing 386 opcode to 8086 */
+}
+/* The microDOS BIOS trap remains intentionally serviced by microDOS.
+ * Everything else that cannot retire on an 80386 remains with blitz86. */
+static int bb386_v12_no8086(int rc)
+{
+    if (C.model < B86_CPU_386 || C.icnt != 0u || rc == B86_HALT)
+        return 0;
+    if ((C.msw & 1u) || rc == B86_SHUTDOWN || rc == B86_UNSUPPORTED)
+        return 1;
+    return C.seg[B86_CS] != C.trap_cs &&
+           (rc == B86_EXIT || rc == B86_BUDGET);
+}
+
+/* BB386_REENTRY_DIAG_V13: real-mode exit and final RC inspection. */
+/* Diagnostic-only: no extra guest instructions, no flag materialization,
+ * no CPU changes, no new buffers. Emit a small bounded set of post-PM slices. */
+static unsigned bb386_v13_follow,bb386_v13_was_pm;
+static void bb386_v13_bytes(const char *tag, uint16_t cs, uint32_t off)
+{
+    uint32_t base=(uint32_t)cs<<4;
+    printf("[bb386-v13] %s %04X:%04lX linear=%06lX bytes:",
+           tag,(unsigned)cs,(unsigned long)(off&0xffffu),
+           (unsigned long)((base+(off&0xffffu))&C.amask));
+    for (unsigned i=0;i<48u;++i) {
+        uint16_t at=(uint16_t)(off+i);
+        uint32_t lin=(base+(uint32_t)at)&C.amask;
+        if (lin>=B86_RAM_BYTES) { printf(" --");continue; }
+        printf(" %02X",(unsigned)*b86_host(&C,lin));
+    }
+    printf("\n");fflush(stdout);
+}
+static void bb386_v13_dump(int rc,uint16_t pre_cs,uint32_t pre_ip,
+                            int pre_pm,uint32_t pre_irq)
+{
+    printf("[bb386-v13] DISPATCH rc=%d pre=%04X:%08lX prePE=%u preIRQ=%08lX "
+           "post=%04X:%08lX CR0=%04X shutdown=%lu IRQ=%08lX icnt=%lu "
+           "icount=%llu last=%02X@%04X flags=%08lX lz=%lu/%lu\n",
+           rc,(unsigned)pre_cs,(unsigned long)pre_ip,(unsigned)pre_pm,
+           (unsigned long)pre_irq,(unsigned)(uint16_t)C.seg[B86_CS],
+           (unsigned long)C.ip,(unsigned)C.msw,
+           (unsigned long)C.shutdown386,(unsigned long)C.irq,
+           (unsigned long)C.icnt,(unsigned long long)C.icount,
+           (unsigned)C.step_op,(unsigned)C.step_oip,
+           (unsigned long)C.flags,(unsigned long)C.lz_kind,
+           (unsigned long)C.lz_ikind);
+    printf("[bb386-v13] GPR eax=%08lX ecx=%08lX edx=%08lX ebx=%08lX "
+           "esp=%08lX ebp=%08lX esi=%08lX edi=%08lX "
+           "ss=%04X ds=%04X es=%04X fs=%04X gs=%04X\n",
+           (unsigned long)C.r[B86_AX],(unsigned long)C.r[B86_CX],
+           (unsigned long)C.r[B86_DX],(unsigned long)C.r[B86_BX],
+           (unsigned long)C.r[B86_SP],(unsigned long)C.r[B86_BP],
+           (unsigned long)C.r[B86_SI],(unsigned long)C.r[B86_DI],
+           (unsigned)(uint16_t)C.seg[B86_SS],(unsigned)(uint16_t)C.seg[B86_DS],
+           (unsigned)(uint16_t)C.seg[B86_ES],(unsigned)C.seg386[0],
+           (unsigned)C.seg386[1]);
+    /* Always dump the pre-dispatch real-mode entry and the final CS target.
+     * Pre-PM selector is not a real-mode paragraph, so skip in that case. */
+    if (!pre_pm) bb386_v13_bytes("pre-code",pre_cs,pre_ip);
+    if (!(C.msw&1u)) {
+        uint16_t cs=(uint16_t)C.seg[B86_CS];
+        bb386_v13_bytes("post-code",cs,C.ip);
+        bb386_v13_bytes("post-prior-16",cs,(uint16_t)(C.ip-16u));
+    }
+    fflush(stdout);
+}
+
+/* BB386_IVT_HALT_DIAG_V14: indirect far-call pointer and IVT boundary. */
+/* Read via the existing page-aware guest host accessor. Diagnostic only:
+ * no writes, no guest instruction execution, no flag materialization. */
+static int bb386_v14_byte(uint16_t seg, uint16_t off, uint8_t *out)
+{
+    const uint32_t phys=(((uint32_t)seg << 4)+(uint32_t)off)&C.amask;
+    if (phys >= B86_RAM_BYTES) return 0;
+    *out=*b86_host(&C,phys);
+    return 1;
+}
+static int bb386_v14_word(uint16_t seg, uint16_t off, uint16_t *out)
+{
+    uint8_t lo,hi;
+    if (!bb386_v14_byte(seg,off,&lo) ||
+        !bb386_v14_byte(seg,(uint16_t)(off+1u),&hi)) return 0;
+    *out=(uint16_t)((uint16_t)lo|((uint16_t)hi<<8));
+    return 1;
+}
+static void bb386_v14_ptr(const char *label, uint16_t seg, uint16_t off)
+{
+    uint16_t target_off=0,target_seg=0;
+    if (!bb386_v14_word(seg,off,&target_off) ||
+        !bb386_v14_word(seg,(uint16_t)(off+2u),&target_seg)) {
+        printf("[bb386-v14] %s source=%04X:%04X pointer=UNREADABLE\n",
+               label,(unsigned)seg,(unsigned)off);return;
+    }
+    printf("[bb386-v14] %s source=%04X:%04X value=%04X:%04X target-linear=%06lX target-bytes:",
+           label,(unsigned)seg,(unsigned)off,(unsigned)target_seg,(unsigned)target_off,
+           (unsigned long)((((uint32_t)target_seg<<4)+target_off)&C.amask));
+    for (unsigned i=0;i<12u;++i) {
+        uint8_t b;
+        if(bb386_v14_byte(target_seg,(uint16_t)(target_off+i),&b)) printf(" %02X",(unsigned)b);
+        else printf(" --");
+    }
+    printf("\n");
+}
+static void bb386_v14_snapshot(const char *tag, uint16_t entry_cs, uint32_t entry_ip)
+{
+    /* Avoid printing on every normal DOS dispatch. */
+    /* The original caller's CS is retained even if the indirect call
+     * has changed CS to 0000: the interesting pointer is still CS:[12C4]. */
+/* BB386_IVT_HALT_DIAG_V14_1: show current CS; retain entry CS for callback reads. */
+    const uint16_t cs=entry_cs,ds=(uint16_t)C.seg[B86_DS];
+    const uint16_t ss=(uint16_t)C.seg[B86_SS],sp=(uint16_t)C.r[B86_SP];
+    printf("[bb386-v14] %s from=%04X:%04X now=%04X:%04X ds=%04X ss:sp=%04X:%04X\n",
+           tag,(unsigned)entry_cs,(unsigned)(uint16_t)entry_ip,
+           (unsigned)(uint16_t)C.seg[B86_CS],(unsigned)(uint16_t)C.ip,(unsigned)ds,(unsigned)ss,(unsigned)sp);
+    bb386_v14_ptr("CS-callback",cs,0x12c4u);
+    bb386_v14_ptr("DS-callback",ds,0x12c4u);
+    bb386_v14_ptr("IVT-vector0",0u,0u);
+    bb386_v14_ptr("IVT-vector1",0u,4u);
+    printf("[bb386-v14] stack-words:");
+    for (unsigned i=0;i<8u;++i){
+        uint16_t val;
+        if(bb386_v14_word(ss,(uint16_t)(sp+2u*i),&val)) printf(" %04X",(unsigned)val);
+        else printf(" ----");
+    }
+    printf("\n");fflush(stdout);
+}
+
+/* BB386_CALLBACK_TIMELINE_V15: bounded callback-pointer snapshots at real-mode re-entry. */
+/* The call at 1231:6570 can occur mid-dispatch (for example a 17-instruction
+ * cold/JIT slice from 0019:4237). Trace all next 8 dispatches after PM exit,
+ * not only dispatches whose entry IP happens to equal the call site.
+ * Read-only, allocation-free, no flag materialization or guest steps. */
+#ifndef BB386_TRACE_PM_EXIT
+#define BB386_TRACE_PM_EXIT 0   /* BB386_QUIET_V1: 1 = V13/V15 per-PM-exit traces */
+#endif
+static unsigned bb386_v15_remaining;
+static int bb386_v15_before(int was_pm)
+{
+    return !was_pm && bb386_v15_remaining != 0u;
+}
+static int bb386_v15_after(int was_pm, int now_pm, int watched)
+{
+    if (was_pm && !now_pm) {
+        bb386_v15_remaining=BB386_TRACE_PM_EXIT ? 8u : 0u;   /* BB386_QUIET_V1 */
+        return BB386_TRACE_PM_EXIT != 0;
+    }
+    if (watched && bb386_v15_remaining) --bb386_v15_remaining;
+    return 0;
+}
+static void bb386_v15_snapshot(const char *stage, uint16_t pre_cs, uint32_t pre_ip)
+{
+    const uint16_t cs=(uint16_t)C.seg[B86_CS];
+    const uint16_t ds=(uint16_t)C.seg[B86_DS];
+    const uint16_t ss=(uint16_t)C.seg[B86_SS];
+    const uint16_t sp=(uint16_t)C.r[B86_SP];
+    uint16_t co=0,cs2=0,doff=0,ds2=0,ao=0,as=0,top=0;
+    const int c_ok=bb386_v14_word(0x1231u,0x12c4u,&co) &&
+                   bb386_v14_word(0x1231u,0x12c6u,&cs2);
+    const int d_ok=bb386_v14_word(ds,0x12c4u,&doff) &&
+                   bb386_v14_word(ds,0x12c6u,&ds2);
+    const int a_ok=bb386_v14_word(0x0ff9u,0x12c4u,&ao) &&
+                   bb386_v14_word(0x0ff9u,0x12c6u,&as);
+    const int s_ok=bb386_v14_word(ss,sp,&top);
+    printf("[bb386-v15] %s pre=%04X:%04X now=%04X:%04X PE=%u "
+           "ds=%04X ss:sp=%04X:%04X stack=%s%04X "
+           "cs1231:12c4=%s%04X:%04X ds:12c4=%s%04X:%04X "
+           "seg0ff9:12c4=%s%04X:%04X rem=%u\n",
+           stage,(unsigned)pre_cs,(unsigned)(uint16_t)pre_ip,
+           (unsigned)cs,(unsigned)(uint16_t)C.ip,(unsigned)(C.msw & 1u),
+           (unsigned)ds,(unsigned)ss,(unsigned)sp,s_ok?"":"!",(unsigned)top,
+           c_ok?"":"!",(unsigned)cs2,(unsigned)co,
+           d_ok?"":"!",(unsigned)ds2,(unsigned)doff,
+           a_ok?"":"!",(unsigned)as,(unsigned)ao,bb386_v15_remaining);
+    fflush(stdout);
+}
+
 B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
@@ -1964,14 +2689,37 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     bb_v25_bios_time();
     bb622_watch_slice(rt);
     /* BB_DOS622_IRQ0_ISOLATION_V1: A/B test native IRQ0 guest-stack delivery */
-    if (rt == R) {
+    /* BB386_PM_STATE_V1: real-mode IVT delivery is wrong while PE=1. */
+    if (rt == R && !bb386_pm()) {
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE && BB622_IRQ0_AB_DISABLE
         if (bb_sd_dos622_active()) {
             if(bb622_irq0_trial_armed){
                 /* Run original PIC dispatcher only at the synchronized MD
                    guest slice boundary; it checks IF, IMR, ISR and IVT. */
                 const uint64_t irq_now=bb_now_us();
+                /* BB622_IRQ0_CAPTURE_GUARD_V1: pre-schedule at the same slice
+                 * timestamp used by the dispatcher. The second schedule in
+                 * dispatch is idempotent. No guest/PIC/CPU state is changed
+                 * between scheduling and dispatch. Only dump the PRE frame
+                 * when every normal PIC dispatch gate is already eligible.
+                 * Without this guard, every IF=0 poll emits a large USB log.
+                 */
+                bb_irq36_schedule(irq_now);
+                const uint32_t bb622_irqv=(uint32_t)bb_irq36.base*4u;
+                const uint8_t *bb622_ivt=rt->cpu.memory+bb622_irqv;
+                const int bb622_irq_eligible=
+                    (bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u) &&
+                    !(bb_irq36.isr & 1u) &&
+                    (md_x86_flags(&rt->cpu) & 0x0200u) &&
+                    (bb622_ivt[0] | bb622_ivt[1] | bb622_ivt[2] | bb622_ivt[3]);
+                if(bb622_irq_eligible) bb622_post_before(rt);
                 const int was_delivered=bb_irq36_dispatch(rt,irq_now);
+                if(was_delivered) {
+                    if(bb622_irq_eligible) bb622_post_accepted(rt);
+                    else printf("[bb622-postirq] UNEXPECTED delivery without eligible snapshot\n");
+                    bb622_steptrace_arm(rt);
+                }
+                if(!was_delivered) bb622_irq0_reason_diag(rt,irq_now,"trial");
                 if(was_delivered){
                     bb622_irq0_trial_armed=0u;
                     printf("[bb622-irqtrial] DELIVERED one guest IRQ0; AUTO-OFF delivered=%llu irr=%02X imr=%02X isr=%02X cs:ip=%04X:%04X\n",
@@ -2001,14 +2749,76 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
                         (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip);
                     fflush(stdout);
                 }
+            }else if(bb622_irq0_cadence.active){
+                const uint64_t now=bb_now_us();
+                const int action=bb622_cadence_poll(&bb622_irq0_cadence,now,
+                    bb_irq36.isr,bb_irq36.auto_eoi);
+                if(action==BB622_CADENCE_RUN){
+                    bb_irq36_dispatch(rt,now); /* original PIC/PIT, no second timer */
+                    if(now-bb622_irq0_cadence.reported_us>=BB622_CADENCE_REPORT_US){
+                        bb622_irq0_cadence.reported_us=now;
+                        printf("[bb622-cadence] PROGRESS elapsed_ms=%llu edges=%llu delivered=%llu eois=%llu bda_delta=%lu coalesced=%llu isr=%02X IF=%u\n",
+                            (unsigned long long)((now-bb622_irq0_cadence.started_us)/1000ull),
+                            (unsigned long long)(bb_irq36.edges-bb622_irq0_cadence.start_edges),
+                            (unsigned long long)(bb_irq36.delivered-bb622_irq0_cadence.start_delivered),
+                            (unsigned long long)(bb_irq36.eois-bb622_irq0_cadence.start_eois),
+                            (unsigned long)(bb_v24_bda_tick()-bb622_irq0_cadence.start_bda),
+                            (unsigned long long)(bb_irq36.coalesced-bb622_irq0_cadence.start_coalesced),
+                            (unsigned)bb_irq36.isr,
+                            (unsigned)((md_x86_flags(&rt->cpu)&0x200u)!=0));
+                        fflush(stdout);
+                    }
+                }else if(action==BB622_CADENCE_FINISH || action==BB622_CADENCE_STALL){
+                    printf("[bb622-cadence] %s elapsed_ms=%llu edges=%llu delivered=%llu eois=%llu bda_delta=%lu coalesced=%llu irr=%02X imr=%02X isr=%02X IF=%u\n",
+                        action==BB622_CADENCE_FINISH?"COMPLETE":"STOP ISR-stall/clock-error",
+                        (unsigned long long)((now>=bb622_irq0_cadence.started_us)?
+                            ((now-bb622_irq0_cadence.started_us)/1000ull):0ull),
+                        (unsigned long long)(bb_irq36.edges-bb622_irq0_cadence.start_edges),
+                        (unsigned long long)(bb_irq36.delivered-bb622_irq0_cadence.start_delivered),
+                        (unsigned long long)(bb_irq36.eois-bb622_irq0_cadence.start_eois),
+                        (unsigned long)(bb_v24_bda_tick()-bb622_irq0_cadence.start_bda),
+                        (unsigned long long)(bb_irq36.coalesced-bb622_irq0_cadence.start_coalesced),
+                        (unsigned)bb_irq36.irr,(unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+                        (unsigned)((md_x86_flags(&rt->cpu)&0x200u)!=0));
+                    fflush(stdout);
+                }
+            }else if(bb622_irq0_burst.active){
+                const uint64_t now=bb_now_us();
+                const int act=bb622_burst_poll(&bb622_irq0_burst,now,bb_irq36.eois,
+                    bb_irq36.isr,md_x86_flags(&rt->cpu),bb_irq36.auto_eoi);
+                if(act!=BB622_BURST_DELIVER && act!=BB622_BURST_FINISHED && act!=BB622_BURST_TIMEOUT) bb622_irq0_reason_diag(rt,now,"burst-blocked");
+                if(act==BB622_BURST_DELIVER){
+                    const int fired=bb_irq36_dispatch(rt,now);
+                    if(!fired) bb622_irq0_reason_diag(rt,now,"burst-rejected");
+                    bb622_burst_result(&bb622_irq0_burst,fired,now,bb_irq36.eois);
+                    if(fired){
+                        printf("[bb622-irqburst] IRQ0 #%u/%u cs:ip=%04X:%04X sp=%04X irr=%02X isr=%02X\n",
+                            (unsigned)bb622_irq0_burst.delivered,(unsigned)BB622_IRQ_BURST_MAX,
+                            (unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip,
+                            (unsigned)rt->cpu.r[B86_SP],
+                            (unsigned)bb_irq36.irr,(unsigned)bb_irq36.isr);
+                        fflush(stdout);
+                    }
+                }else if(act==BB622_BURST_FINISHED || act==BB622_BURST_TIMEOUT){
+                    printf("[bb622-irqburst] %s delivered=%u acknowledged=%u eois=%llu irr=%02X imr=%02X isr=%02X IF=%u\n",
+                        act==BB622_BURST_FINISHED?"COMPLETE":"STOP timeout/no-EOI-or-IRET",
+                        (unsigned)bb622_irq0_burst.delivered,(unsigned)bb622_irq0_burst.completed,
+                        (unsigned long long)bb_irq36.eois,(unsigned)bb_irq36.irr,
+                        (unsigned)bb_irq36.imr,(unsigned)bb_irq36.isr,
+                        (unsigned)((md_x86_flags(&rt->cpu)&0x200u)!=0));
+                    fflush(stdout);
+                }
             }else if(bb622_pic_pending_probe_enabled){bb_irq36_schedule(bb_now_us());}
         } else bb_irq36_dispatch(rt, bb_now_us());
 #else
         bb_irq36_dispatch(rt, bb_now_us());
 #endif
     }
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if (bb_sd_dos622_active()) bb622_post_slice(rt,"SLICE-ENTRY");
+#endif
     if (rt == R && rt->cpu.cs == bios_seg) bb_v40_release("BIOS segment");
-    if (rt != R || rt->cpu.cs == bios_seg) {
+    if (rt != R || (rt->cpu.cs == bios_seg && !bb386_pm())) {   /* BB386_PM_STATE_V1 */
         if (bb_video_seen && rt == R && bb_log_n(++bb_interp_skips)) {
             printf("[bb-handoff] interpreter-owned n=%lu cs:ip=%04X:%04X bios=%04X\n",
                 (unsigned long)bb_interp_skips,(unsigned)rt->cpu.cs,(unsigned)rt->cpu.ip,(unsigned)bios_seg);
@@ -2052,7 +2862,11 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
        Dispatches are NOT individual x86 instructions. */
     /* v13: fixed budget from the FIRST mode-13 return, independent of
        palette count, suspicious-state detection or previously observed path. */
-    const unsigned bb_v10_budget = BB_SLICE_DISPATCH;   /* v33: the v13 256-dispatch diagnostic budget is gone */
+    const unsigned bb_v10_budget =
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+        (bb_sd_dos622_active() && bb622_jittrace_active()) ? 1u :
+#endif
+        BB_SLICE_DISPATCH;   /* v33: the v13 256-dispatch diagnostic budget is gone */
     if (bb_v10_budget != BB_SLICE_DISPATCH) ++bb_v10_small_dispatches;
 
     const uint16_t v13_before_cs=(uint16_t)C.seg[B86_CS];
@@ -2060,7 +2874,66 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     const uint16_t v13_before_sp=(uint16_t)C.r[B86_SP];
     const uint16_t v17_before_ss=(uint16_t)C.seg[B86_SS];
     uint64_t v24_jit_t0=bb_now_us();
-    int rc = b86_jit_run(&C, bb_v10_budget);
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    const int bb622_trace_this_slice = bb_sd_dos622_active() &&
+                                        bb622_jittrace_active();
+    if(bb622_trace_this_slice) bb622_jittrace_dump("BEFORE",-1);
+#endif
+    const int bb386_v13_pre_pm = C.model >= B86_CPU_386 && (C.msw & 1u) != 0u;
+    const uint16_t bb386_v13_pre_cs = (uint16_t)C.seg[B86_CS];
+    const uint32_t bb386_v13_pre_ip = C.ip;
+    const uint32_t bb386_v13_pre_irq = C.irq;
+    /* The traced DOS/4GW callback site: capture BEFORE the dispatch mutates RAM. */
+    const int bb386_v14_site = !bb386_v13_pre_pm &&
+        bb386_v13_pre_cs == 0x1231u && bb386_v13_pre_ip == 0x6570u;
+    if (bb386_v14_site) bb386_v14_snapshot("BEFORE", bb386_v13_pre_cs, bb386_v13_pre_ip);
+    const int bb386_v15_watch = bb386_v15_before(bb386_v13_pre_pm);
+    if (bb386_v15_watch) bb386_v15_snapshot("BEFORE", bb386_v13_pre_cs, bb386_v13_pre_ip);
+    int rc;
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if(bb_sd_dos622_active() && bb622_steptrace_active())
+        rc=bb622_steptrace_run(&C,bios_seg);
+    else
+#endif
+        rc=(bb386_pmirq_poll(), b86_jit_run(&C, bb_v10_budget));   /* BB386_PMIRQ_V1 */
+    /* BB386_PMSLICE_V1: protected mode keeps the CPU for several slice ticks. */
+#ifndef BB386_PM_SLICE_US
+#define BB386_PM_SLICE_US 8000u
+#endif
+    if (BB386_PM_SLICE_US && C.model >= B86_CPU_386) {
+        while (rc == B86_EXIT && (C.msw & 1u) && C.irq == 1u &&
+               bb_now_us() - v24_jit_t0 < (uint64_t)BB386_PM_SLICE_US) {
+            C.irq = 0u;
+            bb386_pmirq_poll();                                   /* BB386_PMIRQ_V1 */
+            rc = b86_jit_run(&C, bb_v10_budget);
+        }
+    }
+    rc=bb386_v12_cold_miss(rc);
+    if (bb386_v14_site) bb386_v14_snapshot("AFTER", bb386_v13_pre_cs, bb386_v13_pre_ip);
+    const int bb386_v15_exit = bb386_v15_after(bb386_v13_pre_pm, (C.msw & 1u) != 0u, bb386_v15_watch);
+    if (bb386_v15_exit) bb386_v15_snapshot("PM-EXIT", bb386_v13_pre_cs, bb386_v13_pre_ip);
+    if (bb386_v15_watch) bb386_v15_snapshot("AFTER", bb386_v13_pre_cs, bb386_v13_pre_ip);
+    if (C.model >= B86_CPU_386) {
+        if (bb386_v13_pre_pm) bb386_v13_was_pm = 1u;
+        if (bb386_v13_pre_pm && !(C.msw & 1u)) bb386_v13_follow = BB386_TRACE_PM_EXIT ? 6u : 0u;   /* BB386_QUIET_V1 */
+        if (bb386_v13_follow ||
+            (bb386_v13_was_pm && (rc == B86_HALT || rc == B86_UNSUPPORTED || rc == B86_SHUTDOWN))) {
+            bb386_v13_dump(rc,bb386_v13_pre_cs,bb386_v13_pre_ip,
+                           bb386_v13_pre_pm,bb386_v13_pre_irq);
+            if (bb386_v13_follow) --bb386_v13_follow;
+        }
+    }
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if(bb622_trace_this_slice) {
+        bb622_jittrace_dump("AFTER",rc);
+        if(--bb622_jittrace_remaining==0u || rc==B86_HALT) {
+            bb622_jittrace_remaining=0;
+            printf("[bb622-jittrace] END rc=%d cs:ip=%04X:%04X\n",
+                   rc,(unsigned)(uint16_t)C.seg[B86_CS],(unsigned)(uint16_t)C.ip);
+            fflush(stdout);
+        }
+    }
+#endif
     bb_v24_jit_us+=bb_now_us()-v24_jit_t0;
     ++bb_v24_jit_calls;
     bb_v24_jit_insns+=C.icnt;
@@ -2096,6 +2969,12 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     st.native_misses += bb_xip_misses() - m1;
     last_rc = rc;
     to_md();
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    if (bb_sd_dos622_active()) {
+        if(bb622_post_active && rc == B86_HALT) bb622_post_dump(rt,"JIT-HALT");
+        else bb622_post_slice(rt,"JIT-EXIT");
+    }
+#endif
     /* Record the FIRST post-mode-13 visit to the IVT as data, not a fault.
        Memory 0000:0000-0000:03FF stores vectors, so this is a useful
        control-flow waypoint regardless of the actual originating opcode. */
@@ -2107,7 +2986,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
                (unsigned long)bb_v10_small_dispatches);
         bb_v7_dump("first-ivt");
     }
-    if (bb_v17_guard(rt,"jit-exit",v13_before_cs,v13_before_ip,
+    if (!bb386_pm() && bb_v17_guard(rt,"jit-exit",v13_before_cs,v13_before_ip,   /* BB386_PM_STATE_V1 */
                      v17_before_ss,v13_before_sp,C.icnt,rc)) {
         rt->instructions += C.icnt; st.retired += C.icnt; ++st.slices;
         return 1;
@@ -2133,6 +3012,14 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     if (rc == B86_TRAP) ++st.traps;
     if (rc == B86_HALT) { ++st.halts; rt->stop_reason = MD_STOP_HALT; }
     C.irq = 0;
+    /* BB386_PM_STATE_V1: never hand a 386 protected-mode (or shut-down)
+       CPU to microDOS's 8086 interpreter. */
+    bb386_pm_track(rc);
+    if (rt->stop_reason == MD_STOP_NONE && bb386_v12_no8086(rc)) {
+        if (rc == B86_EXIT || rc == B86_BUDGET) return 1;      /* retry next slice */
+        bb386_pm_stop(rt, rc);
+        return 1;
+    }
     return C.icnt != 0 || rc == B86_HALT || rt->stop_reason != MD_STOP_NONE;
 }
 

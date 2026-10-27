@@ -30,10 +30,16 @@ def main():
     hot=os.environ.get("BB_HOT_THRESHOLD","32")   # 32
     if not hot.isdigit() or int(hot)>255:
         raise SystemExit("BB_HOT_THRESHOLD must be 0..255 (0 = translate at once)")
+    # B86_386_NATIVE_T1_V1: experimental 386 real-mode JIT, OFF by default.
+    native386=os.environ.get('BB_386_NATIVE_T1','0')
+    if native386 not in ('0','1'):
+        raise SystemExit('BB_386_NATIVE_T1 must be 0 or 1')
+    if native386=='1' and os.environ.get('BB_CPU','8086')!='386':
+        raise SystemExit('BB_386_NATIVE_T1=1 requires BB_CPU=386')
     cpu=os.environ.get("BB_CPU","8086")       # v63: 8086 (exact), 186; v64: 286 (real mode)
-    if cpu not in ("8086","186","286"):
-        raise SystemExit("BB_CPU must be 8086, 186 or 286")
-    cpu_model={"8086":0,"186":1,"286":2}[cpu]
+    if cpu not in ("8086","186","286","386"):
+        raise SystemExit("BB_CPU must be 8086, 186, 286 or 386")
+    cpu_model={"8086":0,"186":1,"286":2,"386":3}[cpu]
     paged=os.environ.get("BB_PAGED","1")
     if paged not in ("0","1"):
         raise SystemExit("BB_PAGED must be 0 or 1 (v40 SRAM-backed guest pages)")
@@ -68,6 +74,13 @@ def main():
     default_kb=(232 if bbuf=="1" else 240) if paged=="1" else 192
     if pin_bytes>8192: default_kb-=(pin_bytes-8192+1023)//1024
     code_kb=os.environ.get("BB_CODE_KB",str(default_kb))
+    # BB_GUEST_RAM_V1: total guest RAM (KiB). 1088 = legacy (1 MiB + HMA, no
+    # extended memory). Above that, the rest is XMS/extended memory reported
+    # by INT 15h 88h/E801h and reachable by protected-mode code only.
+    guest_kb=os.environ.get("BB_GUEST_KB","4096")
+    if not guest_kb.isdigit() or not 1088<=int(guest_kb)<=4608:
+        raise SystemExit("BB_GUEST_KB must be 1088..4608 (total guest RAM, KiB)")
+    guest_bytes=max(int(guest_kb)*1024,0x110020)
     if not code_kb.isdigit() or not 64<=int(code_kb)<=304:
         raise SystemExit("BB_CODE_KB must be 64..288 (SRAM code buffer, KiB)")
     if lcd_peri not in ("48000000","150000000"):
@@ -138,6 +151,9 @@ def main():
         raise SystemExit("BB_PSRAM_LAYOUT_DISK_AFTER_GUEST_V1: expected one disk PSRAM declaration")
     pico_text = pico_text.replace(_disk_decl, '__uninitialized_psram("zz_md_disk")', 1)
     pico_text=pico_text.replace(pico_anchor,'#define MD_GUEST_BYTES (MD_X86_ADDRESS_SPACE + 0x10020u)',1)
+    # BB_GUEST_RAM_V1: the boot memset (moved before the LCD by the SD
+    # overlay, which anchors on it) stays at the 1 MiB + HMA window; extended
+    # memory starts as uninitialised PSRAM, like real DRAM.
     # blitz86's SMC line map is indexed by host address >> 6: the guest buffer
     # must be 64-byte aligned (blitz86 refuses otherwise).
     guest_decl='__uninitialized_psram("md_guest") __attribute__((aligned(16)))'
@@ -152,10 +168,11 @@ def main():
             raise SystemExit('Guest buffer declaration changed; originals untouched')
         pico_text=pico_text.replace(guest_decl+'\n    g_guest[MD_GUEST_BYTES];',
             '__uninitialized_psram("md_guest") __attribute__((aligned(0x200000)))\n'
-            '    g_guest_raw[0xA0000u + MD_GUEST_BYTES];\n'
+            '    g_guest_raw[0xA0000u + B86_RAM_BYTES];\n'
             '#define g_guest (g_guest_raw + 0xA0000u)',1)
     else:
-        pico_text=pico_text.replace(guest_decl,'__uninitialized_psram("md_guest") __attribute__((aligned(64)))',1)
+        pico_text=pico_text.replace(guest_decl+'\n    g_guest[MD_GUEST_BYTES];',
+            '__uninitialized_psram("md_guest") __attribute__((aligned(64)))\n    g_guest[B86_RAM_BYTES];',1)
     # Send the live counters on every Ctrl+] stats request, not only milestones.
     # Generate *actual C lines*.  The C format strings use escaped newline bytes.
     stats_block = r'''g_con.stats_requested=false;md_stats(start_us);
@@ -245,14 +262,15 @@ target_include_directories(blitzbus_pico_b86_dos PRIVATE
     "${{MD_ROOT}}/src/system"
     "${{MD_ROOT}}/pico")
 target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
-    B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10 B86_EVICT_CHUNK={eviction_chunk}u B86_EVICT_ROOM={eviction_room}u
+    B86_386_NATIVE_T1={native386} B86_MAXB=2048 B86_MAP_BITS=12 B86_FAST_BITS=10 B86_EVICT_CHUNK={eviction_chunk}u B86_EVICT_ROOM={eviction_room}u
     BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u BB_NO_CHAIN={no_chain} BB_CHAIN_PROFILE=1
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
-    B86_RAM_FUNCS=1 B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
+    BB386_PM_IRQ0={os.environ.get("BB_PM_IRQ0","1")} BB386_PM_KBD={os.environ.get("BB_PM_KBD","1")} B86_RAM_FUNCS=1 B86_PJ={os.environ.get("BB_PJ","1")} B86_PJ_HASH=512u B86_PJ_CPS=256u{(" B86_PJ_MAXI="+os.environ["BB_PJ_MAXI"]) if os.environ.get("BB_PJ_MAXI") else ""}{(" B86_PJ_CHAIN="+os.environ["BB_PJ_CHAIN"]) if os.environ.get("BB_PJ_CHAIN") else ""} BB_PJ_PSRAM={os.environ.get("BB_PJ_PSRAM","1")}{(" BB_PJ_CODE_KB="+os.environ["BB_PJ_CODE_KB"]) if os.environ.get("BB_PJ_CODE_KB") else ""}{(" BB_PJ_HOT_KB="+os.environ["BB_PJ_HOT_KB"]) if os.environ.get("BB_PJ_HOT_KB") else ""}{(" BB_META_BYTES="+str(int(os.environ["BB_META_KB"])*1024)+"u") if os.environ.get("BB_META_KB") else ""} B86_PM_RAM={os.environ.get("BB_PM_RAM","1")} B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
     PICO_STACK_SIZE=0x1000 PICO_CORE1_STACK_SIZE=0x1000
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
+    B86_RAM_BYTES={guest_bytes}u
     BLITZBUS_LCD_CONSOLE=1
     MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u BB_LCD_LACE={lcd_lace})
 target_sources(blitzbus_pico_b86_dos PRIVATE

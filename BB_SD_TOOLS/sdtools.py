@@ -5,6 +5,7 @@
                 31.99 MiB: DOS 2.x addresses sectors with 16-bit numbers)
   import-bench  copy the programs of a FAT12 floppy image (dosbench3d.img:
                 T2ECPU.COM, 3DBENCH.EXE, ...) into a directory of DRIVE_C.IMG
+                or of a partitioned hard disk image (DOS622_HDD.IMG)
   ls            list a FAT12 floppy image
   export12      copy one file out of a FAT12 image (BOOT.IMG, C: after make-c12)
   check-c       report FAT chains of DRIVE_C.IMG that leave the volume
@@ -213,10 +214,36 @@ def grow_c(args):
     print('Firmware must read C: geometry from the image (blitzBUS sd_boot r2 or later).')
 
 
+def load_fat16(path):
+    """(whole image, byte offset, FAT16) for a superfloppy or an MBR-partitioned
+    disk image (first FAT16 partition, e.g. DOS622_HDD.IMG)."""
+    whole = bytearray(Path(path).read_bytes())
+    try:
+        return whole, 0, F.FAT16(whole)
+    except F.FatError:
+        pass
+    if whole[510:512] != b'\x55\xaa':
+        raise SystemExit(f'{path}: neither a FAT16 volume nor an MBR disk')
+    for i in range(4):
+        e = whole[446 + 16 * i:462 + 16 * i]
+        if e[4] in (0x04, 0x06, 0x0E):
+            start = struct.unpack_from('<I', e, 8)[0] * 512
+            bs = whole[start:start + 512]
+            tot = struct.unpack_from('<H', bs, 19)[0] or struct.unpack_from('<I', bs, 32)[0]
+            vol = bytearray(whole[start:start + tot * 512])
+            return whole, start, F.FAT16(vol)
+    raise SystemExit(f'{path}: no FAT16 partition in the MBR')
+
+
+def save_fat16(path, whole, off, fs):
+    whole[off:off + len(fs.d)] = fs.d
+    F.save_atomic(Path(path), bytes(whole))
+
+
 def import_bench(args):
     fl = FAT12(Path(args.floppy).read_bytes())
     cpath = Path(args.c_image)
-    fs = F.FAT16(bytearray(cpath.read_bytes()))
+    whole, off, fs = load_fat16(cpath)
     mkdirs(fs, args.dest)
     n = 0
     for e in fl.entries():
@@ -228,7 +255,7 @@ def import_bench(args):
         put_bytes(fs, f'{args.dest}/{nm}', fl.read(e))
         print(f'  {args.dest}\\{nm}')
         n += 1
-    F.save_atomic(cpath, bytes(fs.d))
+    save_fat16(cpath, whole, off, fs)
     print(f'{n} files imported into C:\\{args.dest}')
 
 

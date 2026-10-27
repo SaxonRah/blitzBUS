@@ -1,5 +1,0 @@
-[bb622-swap] A:2 OK read-only; BIOS media changed
-[bb622-swap] A:4 FAIL open fr=4 (previous disk retained)
-[bb622-swap] A:1 OK read-only; BIOS media changed
-C11 DOS6 A/B swaps PASS (new-first, missing file retains old, media flag one-shot)
-C11 LCD VGA colors + CP437 box cells PASS

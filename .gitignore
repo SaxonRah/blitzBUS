@@ -1,8 +1,50 @@
+# Generated log files and local recovery copies
 logs/
 backups/
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Build outputs and tool caches
 build/
+/build-host/
+/build-pico/
+/dist/
+/out/
+/.vs/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+*.obj
+*.o
+*.pdb
+*.ilk
 *.uf2
 *.elf
-__pycache__/
-/build-host
-/tools/arj
+*.map
+/tools/arj/
+
+# DOS/Descent extraction is a working directory. The archival extracted tree
+# (descent_complete/) is tracked separately; do not commit extracted copies.
+/descent_extracted/
+
+# Large locally generated disk and archive images. Some historical instances
+# are already tracked; .gitignore does NOT untrack or protect those files.
+*.IMG
+*.img
+*.ARJ
+*.arj
+*.zip
+*.7z
+
+# Installer checksum/rollback history (.bb_*_state and .bb622_*_state)
+# is deliberately NOT ignored: the installed lineage requires those bytes.
+
+# Staged cleanup tool and its local rollback snapshots
+/repo_cleanup_payload/
+/.repo_cleanup_v1_state/
+/bb_repo_cleanup_v1.py
+/README_FIRST.md

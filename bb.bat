@@ -22,5 +22,22 @@ if /I "%CMD%"=="build" (
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\bb_run.ps1" -BuildOnly
   exit /b %ERRORLEVEL%
 )
-echo Usage: bb.bat install ^| upgrade ^| restore ^| build ^| run [-Port COM5] [-Seconds 120] [-NoFlash]
+rem BB_UNIFIED_CLI_V1: additive dispatcher; original five commands above are unchanged.
+if /I "%CMD%"=="dos" (
+  python "%~dp0scripts\bb_cli.py" %*
+  exit /b %ERRORLEVEL%
+)
+if /I "%CMD%"=="cpu" (
+  python "%~dp0scripts\bb_cli.py" %*
+  exit /b %ERRORLEVEL%
+)
+if /I "%CMD%"=="tools" (
+  python "%~dp0scripts\bb_cli.py" %*
+  exit /b %ERRORLEVEL%
+)
+if /I "%CMD%"=="help" (
+  python "%~dp0scripts\bb_cli.py" help
+  exit /b %ERRORLEVEL%
+)
+echo Usage: bb.bat install ^| upgrade ^| restore ^| build ^| run ^| dos ^| cpu ^| tools ^| help
 exit /b 2

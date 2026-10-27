@@ -4,11 +4,22 @@
  */
 #ifndef BB_DOS622_HDD_SD_V1
 #define BB_DOS622_HDD_SD_V1
-#define BB622_HD_SECTORS 65520u
+#define BB622_HD_SECTORS 258048u
 #define BB622_HD_BYTES ((FSIZE_t)BB622_HD_SECTORS * 512u)
 static FIL bb622_hd_fil;
 static bool bb622_hd_open;
 static uint32_t bb622_hd_read_n, bb622_hd_write_n, bb622_hd_error_n;
+/* BB_DOS622_PERF_V1: FatFs fast seek (cluster link map) - without it every
+   backward f_lseek in the 126 MB image walks the FAT chain from the start.
+   Writes are full aligned sectors (FatFs writes them straight to the card);
+   f_sync only every BB622_SYNC_EVERY writes instead of after each one. */
+#ifndef BB622_SYNC_EVERY
+#define BB622_SYNC_EVERY 64u
+#endif
+#if FF_USE_FASTSEEK
+static DWORD bb622_hd_clmt[256];
+#endif
+static uint32_t bb622_hd_unsynced;
 
 bool bb_sd_hdd_available(void) { return bb622_hd_open; }
 
@@ -31,7 +42,7 @@ static void bb622_hd_mount(const char *drive)
     if(fr!=FR_OK||got!=512u||mbr[510]!=0x55u||mbr[511]!=0xAAu||
        mbr[446]!=0x80u||mbr[450]!=0x06u||
        mbr[454]!=63u||mbr[455]!=0u||mbr[456]!=0u||mbr[457]!=0u||
-       mbr[458]!=0xB1u||mbr[459]!=0xFFu||mbr[460]!=0u||mbr[461]!=0u){
+       mbr[458]!=0xC1u||mbr[459]!=0xEFu||mbr[460]!=0x03u||mbr[461]!=0u){
         printf("[bb622-hdd] rejected: MBR partition mismatch\n");
         (void)f_close(&bb622_hd_fil);return;
     }
@@ -40,13 +51,25 @@ static void bb622_hd_mount(const char *drive)
     if(fr==FR_OK)fr=f_read(&bb622_hd_fil,bpb,512u,&got);
     if(fr!=FR_OK||got!=512u||bpb[510]!=0x55u||bpb[511]!=0xAAu||
        bpb[11]!=0u||bpb[12]!=2u||bpb[13]!=4u||bpb[16]!=2u||
+       bpb[19]!=0u||bpb[20]!=0u||bpb[22]!=0xFCu||bpb[23]!=0u||
+       bpb[32]!=0xC1u||bpb[33]!=0xEFu||bpb[34]!=0x03u||bpb[35]!=0u||
        bpb[28]!=63u||bpb[29]!=0u||bpb[30]!=0u||bpb[31]!=0u){
         printf("[bb622-hdd] rejected: FAT16 BPB mismatch\n");
         (void)f_close(&bb622_hd_fil);return;
     }
     bb622_hd_read_n=bb622_hd_write_n=bb622_hd_error_n=0;
+#if FF_USE_FASTSEEK
+    bb622_hd_clmt[0]=sizeof bb622_hd_clmt/sizeof bb622_hd_clmt[0];
+    bb622_hd_fil.cltbl=bb622_hd_clmt;
+    fr=f_lseek(&bb622_hd_fil,CREATE_LINKMAP);
+    if(fr!=FR_OK){bb622_hd_fil.cltbl=0;printf("[bb622-hdd] fast seek off (fr=%d, %lu fragments)\n",(int)fr,(unsigned long)bb622_hd_clmt[0]);}
+    else printf("[bb622-hdd] fast seek ON (%lu link-map words)\n",(unsigned long)bb622_hd_clmt[0]);
+#else
+    printf("[bb622-hdd] fast seek not compiled (FF_USE_FASTSEEK=0)\n");
+#endif
+    bb622_hd_unsynced=0;
     bb622_hd_open=true;
-    printf("[bb622-hdd] BIOS 80h mounted RW 65x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
+    printf("[bb622-hdd] BIOS 80h mounted RW 256x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
 }
 
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
@@ -73,12 +96,18 @@ bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
     bb622_retime_spi1();
     fr=f_lseek(&bb622_hd_fil,(FSIZE_t)lba*512u);
     if(fr==FR_OK)fr=f_write(&bb622_hd_fil,buf,512u,&put);
-    if(fr==FR_OK&&put==512u)fr=f_sync(&bb622_hd_fil);
+    if(fr==FR_OK&&put==512u&&++bb622_hd_unsynced>=BB622_SYNC_EVERY){fr=f_sync(&bb622_hd_fil);bb622_hd_unsynced=0;}
     if(fr!=FR_OK||put!=512u){
         if(++bb622_hd_error_n<=8u)printf("[bb622-hdd] WRITE FAIL lba=%lu fr=%d bytes=%u\n",(unsigned long)lba,(int)fr,(unsigned)put);
         return false;
     }
-    if(++bb622_hd_write_n<=8u)printf("[bb622-hdd] write LBA=%lu SYNC OK\n",(unsigned long)lba);
+    if(++bb622_hd_write_n<=8u)printf("[bb622-hdd] write LBA=%lu OK\n",(unsigned long)lba);
     return true;
+}
+
+/* BB_DOS622_PERF_V1: flush pending HDD writes (call when idle / on exit) */
+void bb_sd_hdd_flush(void)
+{
+    if(bb622_hd_open&&bb622_hd_unsynced){bb622_retime_spi1();(void)f_sync(&bb622_hd_fil);bb622_hd_unsynced=0;}
 }
 #endif

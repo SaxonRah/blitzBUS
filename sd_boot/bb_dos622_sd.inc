@@ -15,10 +15,17 @@ static uint32_t bb622_read_errors;
    B:/C: already retime SPI1 before their post-LCD accesses. */
 static uint32_t bb622_retime_count;
 
+/* BB_DOS622_PERF_V1: 12.5 MHz (25 MHz gave FR_DISK_ERR reads on the
+   test card). -DBB622_SD_SPI_HZ=... to try another rate. Only retime when
+   the rate is wrong. */
+#ifndef BB622_SD_SPI_HZ
+#define BB622_SD_SPI_HZ 12500000u
+#endif
 static void bb622_retime_spi1(void)
 {
     const uint32_t old_baud = spi_get_baudrate(spi1);
-    const uint32_t new_baud = spi_set_baudrate(spi1, 12500000u);
+    if (old_baud == BB622_SD_SPI_HZ && bb622_retime_count) return;
+    const uint32_t new_baud = spi_set_baudrate(spi1, BB622_SD_SPI_HZ);
     if (++bb622_retime_count <= 2u) {
         printf("[bb-dos622-clockfix] spi1 old=%lu new=%lu peri=%lu\n",
                (unsigned long)old_baud, (unsigned long)new_baud,
