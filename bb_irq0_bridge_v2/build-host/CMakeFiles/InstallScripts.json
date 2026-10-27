@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/blitzBUS/bb_irq0_bridge_v2/build-host/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

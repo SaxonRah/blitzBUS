@@ -1,3 +1,0 @@
-C:/blitzBUS/bb_irq0_bridge_v2/build-host/CMakeFiles/bb_irq0_bridge.dir
-C:/blitzBUS/bb_irq0_bridge_v2/build-host/CMakeFiles/ALL_BUILD.dir
-C:/blitzBUS/bb_irq0_bridge_v2/build-host/CMakeFiles/ZERO_CHECK.dir
