@@ -9,7 +9,7 @@
 #if defined(PICO_RP2350) && defined(__arm__) && !defined(__riscv)
 #define BB49_COUNT 1024u
 #ifndef BB49_SAMPLE_HZ
-#define BB49_SAMPLE_HZ 500u   /* v52: 500 Hz (ring 1024 = ~2 s between reports) */
+#define BB49_SAMPLE_HZ 32u    /* profiler V2: 1024 samples = 32 s; cumulative counts outlive ring */
 #endif
 static volatile uint32_t bb49_pc[BB49_COUNT];
 static volatile uint32_t bb49_seq;
@@ -23,6 +23,10 @@ static uint32_t bb49_status;
  * EXC_RETURN bit 4 = 1 means basic integer frame. */
 static volatile uint32_t bb49_candidate_base, bb49_candidate_fp, bb49_rejected;
 static volatile uint32_t bb49_fp_allocated, bb49_base_even_fp, bb49_fp_fallback;
+/* Profiler V2: cumulative accepted-PC region totals survive ring overwrites.
+ * Updated only in SysTick after validation, no allocations or printf in IRQ. */
+static volatile uint32_t bb49_total_sram, bb49_total_flash, bb49_total_psram, bb49_total_other;
+static uint32_t bb49_ring_lost_total;
 /* On the RP2350 build, a valid base frame was observed even with FType=0.
  * Test both candidate locations; NEVER assume either one solely from FType.
  * The Thumb bit is in stacked xPSR (not PC bit 0). */
@@ -30,6 +34,7 @@ static int bb49_valid_pair(uint32_t pc, uint32_t xpsr) {
     if (!(xpsr & 0x01000000u)) return 0;
     if (pc & 1u) return 0; /* stacked PC on Cortex-M is halfword aligned */
     return ((pc>=0x10000000u && pc<0x11000000u) ||
+            (pc>=0x11000000u && pc<0x11800000u) || /* mapped 8 MiB PSRAM */
             (pc>=0x20000000u && pc<0x20082000u));
 }
 __attribute__((noinline,used)) static void bb49_capture_frame(
@@ -51,6 +56,10 @@ __attribute__((noinline,used)) static void bb49_capture_frame(
     } else {
         bb49_rejected++; return;
     }
+    if (pc>=0x20000000u && pc<0x20082000u) ++bb49_total_sram;
+    else if (pc>=0x10000000u && pc<0x11000000u) ++bb49_total_flash;
+    else if (pc>=0x11000000u && pc<0x11800000u) ++bb49_total_psram;
+    else ++bb49_total_other;
     bb49_pc[bb49_seq & (BB49_COUNT-1u)] = pc;
     bb49_seq++;
 }
@@ -94,7 +103,7 @@ static void bb49_init(uint32_t reload_ticks) {
 /* v49d: reporting-only region classification and raw-PC evidence.
  * Safe: no lookup, printf or allocation in the interrupt handler. */
 static const char *bb49_region(uint32_t pc) {
-    if (pc >= 0x20000000u && pc < 0x20080000u) return "SRAM";
+    if (pc >= 0x20000000u && pc < 0x20082000u) return "SRAM";
     if (pc >= 0x10000000u && pc < 0x11000000u) return "XIP-FLASH";
     if (pc >= 0x11000000u && pc < 0x12000000u) return "PSRAM";
     if (pc < 0x02000000u) return "LOW-ALIAS";
@@ -105,17 +114,22 @@ static void bb49_report(struct B86Jit *jit) {
     volatile uint32_t * const systick=(volatile uint32_t*)0xE000E010u;
     volatile uint32_t * const vtor=(volatile uint32_t*)0xE000ED08u;
     volatile uint32_t * const icsr=(volatile uint32_t*)0xE000ED04u;
-    uint32_t stop=bb49_seq;
-    uint32_t first=bb49_previous;
     if (!bb49_enabled) {
         if(!bb49_ignored++)printf("[bb-v49-pc] inactive status=%lu\n",(unsigned long)bb49_status);
         return;
     }
-    uint32_t missed=stop-first>BB49_COUNT?stop-first-BB49_COUNT:0u;
-    if(missed)first=stop-BB49_COUNT;
-    /* Freeze the sampler while reading ring slots: bounded report work only. */
+    /* Freeze FIRST, then snapshot indices/cumulative counts. Otherwise a
+     * SysTick could overwrite the ring while we choose the read window. */
     bb49_enabled=0;
     __asm volatile("dmb sy" ::: "memory");
+    uint32_t stop=bb49_seq;
+    uint32_t first=bb49_previous;
+    uint32_t missed=stop-first>BB49_COUNT?stop-first-BB49_COUNT:0u;
+    if(missed)first=stop-BB49_COUNT;
+    bb49_ring_lost_total += missed;
+    const uint32_t total_sram=bb49_total_sram, total_flash=bb49_total_flash;
+    const uint32_t total_psram=bb49_total_psram, total_other=bb49_total_other;
+    const uint32_t total_lost=bb49_ring_lost_total;
     uint32_t regions[6]={0};
     uint32_t mapped=0,unmapped=0;
     uint32_t raw_pc[12]={0},raw_count[12]={0};
@@ -124,7 +138,7 @@ static void bb49_report(struct B86Jit *jit) {
     for(uint32_t i=first;i<stop;i++) {
         uint32_t pc=bb49_pc[i&(BB49_COUNT-1u)]&~1u;
         unsigned region=5;
-        if(pc>=0x20000000u && pc<0x20080000u)region=0;
+        if(pc>=0x20000000u && pc<0x20082000u)region=0;
         else if(pc>=0x10000000u && pc<0x11000000u)region=1;
         else if(pc>=0x11000000u && pc<0x12000000u)region=2;
         else if(pc<0x02000000u)region=3;
@@ -175,6 +189,10 @@ static void bb49_report(struct B86Jit *jit) {
       (unsigned long)(stop-first),(unsigned long)regions[0],(unsigned long)regions[1],
       (unsigned long)regions[2],(unsigned long)regions[3],(unsigned long)regions[4],
       (unsigned long)regions[5],(unsigned long)mapped,(unsigned long)unmapped,(unsigned long)missed);
+    printf("[bb-v49g-cumulative] valid=%lu sram=%lu flash=%lu psram=%lu other=%lu ring-lost=%lu rejected=%lu\n",
+      (unsigned long)stop, (unsigned long)total_sram, (unsigned long)total_flash,
+      (unsigned long)total_psram, (unsigned long)total_other,
+      (unsigned long)total_lost, (unsigned long)bb49_rejected);
     for(unsigned k=0;k<12;k++)if(raw_count[k])
       printf("[bb-v49f-rawpc] pc=%08lX region=%s count=%lu\n",
         (unsigned long)raw_pc[k],bb49_region(raw_pc[k]),(unsigned long)raw_count[k]);
