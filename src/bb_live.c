@@ -1751,12 +1751,32 @@ static void bb386_kq_put(uint8_t v)
 static void bb386_kbd_push(uint8_t scan)
 {
     if (!BB386_PM_KBD || !scan || C.model < B86_CPU_386) return;
+    /* BB386_PMKBD_RM_GUARD_V1: route DOS keystrokes only to BIOS buffer. */
+    if (!(C.msw & 1u)) {
+        /* A prior PM episode may have left scan codes/OBF/IRR pending.
+           A real-mode key event is the handoff boundary: discard PM data.
+           Never touch the PIC in-service bit; guest EOI owns it. */
+        if (bb386_kq_head != bb386_kq_tail || bb386_kobf || (bb_irq36.irr & 2u)) {
+            static unsigned rm_discard_logs;
+            if (rm_discard_logs++ < 8u) {
+                printf("[bb386-pmkbd-rm-guard] discarded queued=%u obf=%u irr=%02X\n",
+                    (unsigned)((bb386_kq_tail - bb386_kq_head) & 63u),
+                    (unsigned)bb386_kobf, (unsigned)bb_irq36.irr);
+            }
+        }
+        bb386_kq_head = bb386_kq_tail;
+        bb386_kobf = 0u;
+        bb_irq36.irr &= (uint8_t)~2u;
+        return;
+    }
     if (!bb386_kbd_pm_us || bb_now_us() - bb386_kbd_pm_us > 2000000u) return;   /* DOS: BIOS buffer only */
     bb386_kq_put(scan);
     bb386_kq_put((uint8_t)(scan | 0x80u));
 }
 static int bb386_kbd_port_in(uint16_t port, uint8_t *v)
 {
+    /* In real mode, the original DOS/BIOS input hook owns ports 60h/64h. */
+    if (!(C.msw & 1u)) return 0;
     if (!BB386_PM_KBD || !bb386_kbd_pm_us) return 0;
     if (port == 0x60u) { *v = bb386_k60; bb386_kobf = 0u; return 1; }
     if (port == 0x64u) { *v = (uint8_t)(0x1Cu | bb386_kobf); return 1; }

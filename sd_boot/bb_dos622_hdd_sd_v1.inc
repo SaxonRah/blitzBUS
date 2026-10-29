@@ -72,8 +72,92 @@ static void bb622_hd_mount(const char *drive)
     printf("[bb622-hdd] BIOS 80h mounted RW 256x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
 }
 
+/* BB622_HDD_LIFE_V2: additive observer only. No reopen/retry/remount. */
+static FATFS *bb_life_v2_initial_fs;
+static WORD bb_life_v2_initial_id;
+static uint32_t bb_life_v2_ops, bb_life_v2_errors;
+static uint32_t bb_life_v2_lba;
+static unsigned bb_life_v2_mode;
+static bool bb_life_v2_seen, bb_life_v2_warned;
+
+static void bb_life_v2_dump(const char *stage, FRESULT result, UINT transferred)
+{
+    sd_card_t *card=sd_get_by_num(0u);
+    FATFS *active=card ? &card->state.fatfs : NULL;
+    FATFS *handle=bb622_hd_fil.obj.fs; /* opaque: NEVER dereference */
+    printf("[bb622-hdd-life] %s lba=%lu fr=%d bytes=%u ops=%lu faults=%lu "
+           "fil=%p fil.fs=%p active.fs=%p initial.fs=%p "
+           "fil.id=%u active.id=%u initial.id=%u fs_type=%u mounted=%u "
+           "eq-active=%u eq-initial=%u status=%u\n",
+           stage,(unsigned long)bb_life_v2_lba,(int)result,(unsigned)transferred,
+           (unsigned long)bb_life_v2_ops,(unsigned long)bb_life_v2_errors,
+           (void*)&bb622_hd_fil,(void*)handle,(void*)active,(void*)bb_life_v2_initial_fs,
+           (unsigned)bb622_hd_fil.obj.id,(unsigned)(active?active->id:0u),
+           (unsigned)bb_life_v2_initial_id,(unsigned)(active?active->fs_type:0u),
+           (unsigned)(card?card->state.mounted:0u),
+           (unsigned)(handle==active),(unsigned)(handle==bb_life_v2_initial_fs),
+           (unsigned)disk_status(0u));
+}
+static void bb_life_v2_fault(const char *stage, FRESULT fr, UINT transferred)
+{
+    ++bb_life_v2_errors;
+    if(bb_life_v2_errors<=12u)bb_life_v2_dump(stage,fr,transferred);
+}
+static void bb_life_v2_enter(unsigned mode, uint32_t lba)
+{
+    sd_card_t *card=sd_get_by_num(0u);
+    FATFS *active=card ? &card->state.fatfs : NULL;
+    bb_life_v2_mode=mode;bb_life_v2_lba=lba;
+    ++bb_life_v2_ops;
+    if(!bb_life_v2_seen){
+        bb_life_v2_initial_fs=active;
+        bb_life_v2_initial_id=active?active->id:0u;
+        bb_life_v2_seen=true;
+        bb_life_v2_dump("first-io",FR_OK,0u);
+    }
+    if(!(bb_life_v2_ops&4095u) && !bb_life_v2_warned){
+        if(!active || active!=bb_life_v2_initial_fs ||
+           bb622_hd_fil.obj.fs!=active ||
+           bb622_hd_fil.obj.id!=active->id ||
+           active->id!=bb_life_v2_initial_id ||
+           !active->fs_type || !card->state.mounted){
+            bb_life_v2_warned=true;
+            bb_life_v2_dump("early-id-mismatch",FR_INVALID_OBJECT,0u);
+        }
+    }
+}
+static FRESULT bb_life_v2_seek(FIL *f, FSIZE_t off)
+{
+    FRESULT fr=f_lseek(f,off);
+    if(fr!=FR_OK)bb_life_v2_fault(bb_life_v2_mode==1u?"seek-read":"seek-write",fr,0u);
+    return fr;
+}
+static FRESULT bb_life_v2_read(FIL *f, void *buf, UINT n, UINT *got)
+{
+    FRESULT fr=f_read(f,buf,n,got);
+    if(fr!=FR_OK || !got || *got!=n)bb_life_v2_fault("read",fr,got?*got:0u);
+    return fr;
+}
+static FRESULT bb_life_v2_write(FIL *f, const void *buf, UINT n, UINT *put)
+{
+    FRESULT fr=f_write(f,buf,n,put);
+    if(fr!=FR_OK || !put || *put!=n)bb_life_v2_fault("write",fr,put?*put:0u);
+    return fr;
+}
+static FRESULT bb_life_v2_sync(FIL *f)
+{
+    FRESULT fr=f_sync(f);
+    if(fr!=FR_OK)bb_life_v2_fault(bb_life_v2_mode==3u?"sync-flush":"sync-write",fr,0u);
+    return fr;
+}
+/* END BB622_HDD_LIFE_V2 HELPER */
+
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 {
+#define f_lseek bb_life_v2_seek
+#define f_read bb_life_v2_read
+    bb_life_v2_enter(1u, lba);
+
     UINT got=0;
     FRESULT fr;
     if(!bb622_hd_open||!buf||size!=512u||lba>=BB622_HD_SECTORS)return false;
@@ -86,10 +170,18 @@ bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
     }
     if(++bb622_hd_read_n<=8u)printf("[bb622-hdd] read LBA=%lu OK\n",(unsigned long)lba);
     return true;
+
+#undef f_lseek
+#undef f_read
 }
 
 bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
 {
+#define f_lseek bb_life_v2_seek
+#define f_write bb_life_v2_write
+#define f_sync bb_life_v2_sync
+    bb_life_v2_enter(2u, lba);
+
     UINT put=0;
     FRESULT fr;
     if(!bb622_hd_open||!buf||size!=512u||lba>=BB622_HD_SECTORS)return false;
@@ -103,11 +195,20 @@ bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
     }
     if(++bb622_hd_write_n<=8u)printf("[bb622-hdd] write LBA=%lu OK\n",(unsigned long)lba);
     return true;
+
+#undef f_lseek
+#undef f_write
+#undef f_sync
 }
 
 /* BB_DOS622_PERF_V1: flush pending HDD writes (call when idle / on exit) */
 void bb_sd_hdd_flush(void)
 {
+#define f_sync bb_life_v2_sync
+    bb_life_v2_enter(3u, 0u);
+
     if(bb622_hd_open&&bb622_hd_unsynced){bb622_retime_spi1();(void)f_sync(&bb622_hd_fil);bb622_hd_unsynced=0;}
+
+#undef f_sync
 }
 #endif
