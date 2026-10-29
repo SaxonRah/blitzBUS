@@ -28,6 +28,7 @@ static int bb622_at_vga_int10(uint16_t *ax, uint16_t *bx, uint16_t *cx,
         /* Supported geometry: 80x25 VGA mode 3, single installed font block.
          * Other block selectors require VGA plane-2 font storage. */
         if (mode != 3u || (*bx & 255u) != 0u) return 0;
+        bb_v34_note(0x440u,0x50u); /* BB_V34_HOSTWRITE_V1 geometry BDA */
         mem[0x484u] = 24u;           /* highest displayed row */
         mem[0x485u] = 16u;           /* bytes/character on display */
         cursor_shape = 0x0607u;
@@ -50,6 +51,7 @@ static int bb622_at_vga_int10(uint16_t *ax, uint16_t *bx, uint16_t *cx,
         const unsigned attr_default = (unsigned)(*bx & 255u);
         if (mode != 3u || (*bx >> 8) != 0u || row > 24u || col > 79u)
             return 0;
+        bb_v34_note(0xB8000u,4000u); /* BB_V34_HOSTWRITE_V1 text string */
         const uint16_t previous_cursor = cursor[0];
         for (unsigned i = 0; i < (unsigned)*cx; ++i) {
             const uint16_t o = (uint16_t)(*bp + (uint16_t)(i * (paired ? 2u : 1u)));

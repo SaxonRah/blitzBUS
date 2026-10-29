@@ -178,6 +178,7 @@ static bool BB622_FLASH bb622_int15_move(MdRuntime *rt)
     src = (uint32_t)g[0x12] | (uint32_t)g[0x13] << 8 | (uint32_t)g[0x14] << 16 | (uint32_t)g[0x17] << 24;
     dst = (uint32_t)g[0x1A] | (uint32_t)g[0x1B] << 8 | (uint32_t)g[0x1C] << 16 | (uint32_t)g[0x1F] << 24;
     if ((uint64_t)src + n > B86_RAM_BYTES || (uint64_t)dst + n > B86_RAM_BYTES) goto fail;
+    b86_v34_note_host_phys(dst, n); /* BB_V34_HOSTWRITE_V1 INT15 physical DMA */
     for (i = 0; i < n; ++i) *b86_host(&C, dst + i) = *b86_host(&C, src + i);
     if (C.jit && n && dst < B86_MEM_BYTES)
         b86_jit_invalidate(C.jit, dst, (dst + n > B86_MEM_BYTES) ? B86_MEM_BYTES - dst : n);

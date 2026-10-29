@@ -5,6 +5,10 @@
 #include "bb_vga.h"
 #include <string.h>
 #include <stdio.h>  /* BB_DOS622_VGA0B_STDIO_FIX_V1 */
+/* BB_V34_HOSTWRITE_V1: writer observations; not an SMC skip authority. */
+extern void b86_v34_note_host_phys(uint32_t phys, uint32_t size);
+static inline void bb_v34_note(uint32_t phys, uint32_t size)
+{ b86_v34_note_host_phys(phys, size); }
 #define VMEM_SIZE 0x110000u
 static uint8_t *mem;
 /* v40: when blitz86 keeps the A000 window in SRAM, all VGA accesses here
@@ -46,8 +50,9 @@ static void defaults(void) {
 }
 static uint32_t linear(uint16_t seg,uint16_t off){return (((uint32_t)seg<<4)+off)&0xFFFFFu;}
 static uint8_t mread(uint16_t s,uint16_t o){return mem[linear(s,o)];}
-static void mwrite(uint16_t s,uint16_t o,uint8_t v){mem[linear(s,o)]=v;}
+static void mwrite(uint16_t s,uint16_t o,uint8_t v){uint32_t p=linear(s,o);bb_v34_note(p,1u);mem[p]=v;}
 static void video_bda(void){
+    bb_v34_note(0x440u,0x50u);
     mem[0x449]=mode;mem[0x44A]=cols;mem[0x44B]=0;
     mem[0x44C]=(uint8_t)((mode==0x13?64000u:4000u)&255u);
     mem[0x44D]=(uint8_t)((mode==0x13?64000u:4000u)>>8);
@@ -59,7 +64,7 @@ static void video_bda(void){
 }
 static void set_mode(uint8_t m,bool preserve){
     mode=m;page=0;cols=(m==0x13?40:80);
-    if(!preserve){if(m==0x13)memset(VGA_A(0xA0000u),0,64000);else memset(mem+0xB8000,0,4000);}
+    if(!preserve){if(m==0x13){bb_v34_note(0xA0000u,64000u);memset(VGA_A(0xA0000u),0,64000);}else{bb_v34_note(0xB8000u,4000u);memset(mem+0xB8000,0,4000);}}
     if(m==0x13)defaults();
     memset(cursor,0,sizeof cursor);video_bda();
 }
@@ -76,6 +81,7 @@ static void scroll_text(unsigned top,unsigned left,unsigned bottom,unsigned righ
     if(bottom>24)bottom=24;if(right>79)right=79;
     if(bottom<top||right<left)return;
     unsigned width=right-left+1,height=bottom-top+1;
+    bb_v34_note(0xB8000u,4000u); /* Scroll memmoves and fills */
     /* BB_DOS622_SCREEN_CLEAR_V1: INT 10h AH=06h/07h with AL=0
        clears the entire window, NOT zero rows. Before this fix AH=06h
        cleared nothing; AH=07h could wrap top+n-1 and write outside B800.
@@ -97,7 +103,7 @@ static void put_char(uint8_t c,uint8_t attribute,unsigned p,int advance){
         else if(c==10){y++;}
         else if(c==8){if(x)x--;}
         else if(c==7){}
-        else {if(x>=80)x=0;if(y>=25)y=24;unsigned o=0xB8000+(y*80+x)*2;mem[o]=c;mem[o+1]=attribute;x++;}
+        else {if(x>=80)x=0;if(y>=25)y=24;unsigned o=0xB8000+(y*80+x)*2;bb_v34_note(o,2u);mem[o]=c;mem[o+1]=attribute;x++;}
         if(x>=80){x=0;y++;}
         if(y>=25){scroll_text(0,0,24,79,1,7,0);y=24;}
         if(advance)cursor[p]=(uint16_t)((y<<8)|x);
@@ -151,7 +157,7 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
     if(!mem)return false;
     switch(ah){
     case 0x00:if((al&127)!=3&&(al&127)!=0x13)return false;set_mode(al&127,(al&128)!=0);return true;
-    case 0x01:cursor_shape=*cx;mem[0x460]=(uint8_t)*cx;mem[0x461]=(uint8_t)(*cx>>8);return true;
+    case 0x01:cursor_shape=*cx;bb_v34_note(0x460u,2u);mem[0x460]=(uint8_t)*cx;mem[0x461]=(uint8_t)(*cx>>8);return true;
     case 0x02:cursor[*bx>>8&7]=(uint16_t)((*dx>>8)*256u+(*dx&255u));video_bda();return true;
     case 0x03:*cx=cursor_shape;*dx=cursor[*bx>>8&7];return true;
     case 0x05:page=(uint8_t)(al&7u);video_bda();return true;
@@ -161,7 +167,7 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
         if(mode==3){unsigned cur=cursor[*bx>>8&7],o=0xB8000+((cur>>8)*80u+(cur&255u))*2u;*ax=(uint16_t)((mem[o+1]<<8)|mem[o]);return true;}
         return false;
     case 0x09:case 0x0A:
-        if(mode==3){unsigned p=*bx>>8&7u,cur=cursor[p],x=cur&255u,y=cur>>8;
+        if(mode==3){bb_v34_note(0xB8000u,4000u);unsigned p=*bx>>8&7u,cur=cursor[p],x=cur&255u,y=cur>>8;
             for(unsigned i=0;i<*cx;i++){unsigned xx=x+i,yy=y+xx/80u;xx%=80u;if(yy>=25)break;unsigned o=0xB8000+(yy*80+xx)*2;mem[o]=al;if(ah==9)mem[o+1]=(uint8_t)*bx;}return true;}
         return false;
     /* BB_DOS622_VGA0B_KEYS_V1: IBM CGA-compatible INT10 AH=0Bh.
@@ -185,7 +191,7 @@ bool bb_vga_int10(uint16_t *ax,uint16_t *bx,uint16_t *cx,uint16_t *dx,
         return true;
     case 0x0C:
         if(mode==0x13&&*cx<320u&&*dx<200u){unsigned o=0xA0000+*dx*320u+*cx;
-            if(al&128)*VGA_A(o)^=al&127;else *VGA_A(o)=al;return true;}return false;
+            bb_v34_note(o,1u);if(al&128)*VGA_A(o)^=al&127;else *VGA_A(o)=al;return true;}return false;
     case 0x0D:
         if(mode==0x13&&*cx<320u&&*dx<200u){*ax=(uint16_t)((*ax&0xFF00u)|*VGA_A(0xA0000u+*dx*320u+*cx));return true;}return false;
     case 0x0E:put_char(al,(uint8_t)*bx,*bx>>8,1);return true;
