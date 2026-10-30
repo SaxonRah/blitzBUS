@@ -573,11 +573,20 @@ static void bb_trace_port(uint16_t port, uint8_t result, uint32_t n) {
  * No synthetic keypresses. No-key AH=00 retries the INT later.
  * A platform keyboard producer may append BIOS AX words to that BDA ring.
  */
+/* BB_V43_HOSTWRITERS_V1: diagnostics for physical guest-memory write stamps.
+ * Counters are observational and are never coherence authority. */
+static uint32_t bb_v43_word_marks, bb_v43_clock_marks;
+static uint32_t bb_v43_pm_stub_marks, bb_v43_pm_ivt_marks;
 static unsigned bb_v22_key_calls;
 static uint16_t bb_v22_word(const uint8_t *m, unsigned addr)
 { return (uint16_t)((unsigned)m[addr] | ((unsigned)m[addr+1u]<<8)); }
 static void bb_v22_write_word(uint8_t *m, unsigned addr, uint16_t w)
-{ m[addr]=(uint8_t)w; m[addr+1u]=(uint8_t)(w>>8); }
+{
+    /* BB_V43_HOSTWRITERS_V1: this writes physical guest BDA/keyboard RAM. */
+    bb_v34_note((uint32_t)addr, 2u);
+    ++bb_v43_word_marks;
+    m[addr]=(uint8_t)w; m[addr+1u]=(uint8_t)(w>>8);
+}
 static void bb_v22_queue_init(uint8_t *m)
 {
     uint16_t h=bb_v22_word(m,0x41au),t=bb_v22_word(m,0x41cu);
@@ -734,6 +743,11 @@ static uint32_t bb_v24_bda_tick(void); /* v34 diagnostic declaration */
 static uint32_t bb_v51_stack_peak(void);
 #endif
 static void bb_v24_report(void) {
+    /* BB_V43_HOSTWRITERS_V3: the live Pico console uses this report path.
+     * Read-only counters, once per existing diagnostic report. */
+    printf("[bb-v43-hostwriters] word=%lu clock=%lu pm-stub=%lu pm-ivt=%lu exact-bypass=0 authoritative=0\n",
+        (unsigned long)bb_v43_word_marks, (unsigned long)bb_v43_clock_marks,
+        (unsigned long)bb_v43_pm_stub_marks, (unsigned long)bb_v43_pm_ivt_marks);
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     printf("[bb-v51-stack] core0 peak=%lu of %lu bytes\n", (unsigned long)bb_v51_stack_peak(),
            (unsigned long)((uintptr_t)__StackTop - (uintptr_t)__StackBottom));
@@ -812,6 +826,9 @@ static void bb_v25_bios_time(void) {
     uint32_t old = (uint32_t)m[0x46cu] | ((uint32_t)m[0x46du]<<8) |
                    ((uint32_t)m[0x46eu]<<16) | ((uint32_t)m[0x46fu]<<24);
     if (ticks != old) {
+        /* BB_V43_HOSTWRITERS_V1: host-updated BIOS clock, physical 046C. */
+        bb_v34_note(0x46Cu, 4u);
+        ++bb_v43_clock_marks;
         m[0x46cu]=(uint8_t)ticks;
         m[0x46du]=(uint8_t)(ticks>>8);
         m[0x46eu]=(uint8_t)(ticks>>16);
@@ -2419,7 +2436,12 @@ static void bb386_kbd_poll(void)
     if (!(m[0x24] | m[0x25] | m[0x26] | m[0x27])) {      /* null real-mode INT 09h: seed a safe one */
         static const uint8_t stub[] = { 0x50, 0xE4, 0x60, 0xB0, 0x20, 0xE6, 0x20, 0x58, 0xCF };
         uint8_t *s = b86_host_phys(&C, 0xF01A0u);
+        /* BB_V43_HOSTWRITERS_V1: physical stub and IVT are host-written. */
+        bb_v34_note(0xF01A0u, (uint32_t)sizeof stub);
+        ++bb_v43_pm_stub_marks;
         for (unsigned i = 0; i < sizeof stub; ++i) s[i] = stub[i];
+        bb_v34_note(0x24u, 4u);
+        ++bb_v43_pm_ivt_marks;
         m[0x24] = 0xA0; m[0x25] = 0x01; m[0x26] = 0x00; m[0x27] = 0xF0;
     }
     if (!b86_irq(&C, (uint8_t)(bb_irq36.base + 1u))) return;
@@ -3113,6 +3135,9 @@ void bb_live_print_extra(void (*say)(const char *fmt, ...))
         (unsigned long)bb_v23_lcd_ticks,(unsigned long)bb_v23_changed_samples,
         (unsigned long)bb_v23_keys,(unsigned long)bb_v23_key_drop,
         (unsigned long)bb_v23_polls,bb_v22_key_calls);
+    say("[bb-v43-hostwriters] word=%lu clock=%lu pm-stub=%lu pm-ivt=%lu exact-bypass=0 authoritative=0\n",
+        (unsigned long)bb_v43_word_marks, (unsigned long)bb_v43_clock_marks,
+        (unsigned long)bb_v43_pm_stub_marks, (unsigned long)bb_v43_pm_ivt_marks);
     say("[bb-live-time] native=%llu ms (translate=%llu ms) sync=%llu ms flushes=%llu dispatches=%llu fast=%llu native-misses=%llu translate-misses=%llu\n",
         (unsigned long long)(s.native_us / 1000u), (unsigned long long)(s.translate_us / 1000u),
         (unsigned long long)(s.sync_us / 1000u), (unsigned long long)s.flushes,
