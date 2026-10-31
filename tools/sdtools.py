@@ -13,13 +13,13 @@
                 and/or host folders
 
 Examples (PowerShell):
-  python .\\BB_SD_TOOLS\\sdtools.py grow-c O:\\BLITZBUS\\DRIVE_C.IMG --mb 32
-  python .\\BB_SD_TOOLS\\sdtools.py import-bench C:\\blitzBUS\\media\\dosbench3d.img O:\\BLITZBUS\\DRIVE_C.IMG BENCH
+  python .\\tools\\sdtools.py grow-c O:\\BLITZBUS\\DRIVE_C.IMG --mb 32
+  python .\\tools\\sdtools.py import-bench C:\\blitzBUS\\media\\dosbench3d.img O:\\BLITZBUS\\DRIVE_C.IMG BENCH
 """
 import argparse, shutil, struct, sys, tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'BB_FAT16_TOOL'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # fat16tool.py sits next to this file
 import fat16tool as F                                             # noqa: E402
 
 MAX_SECTORS = 65520           # 16-bit sector numbers (DOS 2.x request header, BPB)

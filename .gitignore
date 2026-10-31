@@ -8,6 +8,8 @@ backups/
 *.rej
 
 # Build outputs and tool caches
+# generated/ is rewritten by scripts/install_live.py on every build
+/generated/
 build/
 /build-host/
 /build-pico/
@@ -43,8 +45,3 @@ __pycache__/
 # Installer checksum/rollback history (.bb_*_state and .bb622_*_state)
 # is deliberately NOT ignored: the installed lineage requires those bytes.
 
-# Staged cleanup tool and its local rollback snapshots
-/repo_cleanup_payload/
-/.repo_cleanup_v1_state/
-/bb_repo_cleanup_v1.py
-/README_FIRST.md

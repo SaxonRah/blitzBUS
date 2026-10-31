@@ -45,4 +45,4 @@ if([System.IO.File]::Exists($req)){
  try {if([System.IO.File]::ReadAllText($req).Trim() -eq 'ARM') {[System.IO.File]::Delete($req)}}catch{}
 }
 if($hostSent){throw 'HOST SENT but no Pico ARM ACK; check firmware flashed/serial path'}
-throw 'HOST DID NOT SEND; run bb_live_run_dos622_irqtrial.ps1'
+throw 'HOST DID NOT SEND; start .\bb.bat boot'

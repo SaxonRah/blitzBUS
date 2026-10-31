@@ -20,23 +20,23 @@ Expand-Archive .\BB_FAT16_TOOL.zip . -Force
 Copy-Item O:\BLITZBUS\DRIVE_C.IMG C:\blitzBUS\DRIVE_C_BACKUP.IMG
 
 # Examine image
-python .\BB_FAT16_TOOL\fat16tool.py info
-python .\BB_FAT16_TOOL\fat16tool.py ls
+python .\tools\fat16tool.py info
+python .\tools\fat16tool.py ls
 
 # Create TOOLS directory and import a DOS program
-python .\BB_FAT16_TOOL\fat16tool.py mkdir TOOLS
-python .\BB_FAT16_TOOL\fat16tool.py import C:\DOS\EDIT.COM TOOLS/EDIT.COM
-python .\BB_FAT16_TOOL\fat16tool.py ls TOOLS
+python .\tools\fat16tool.py mkdir TOOLS
+python .\tools\fat16tool.py import C:\DOS\EDIT.COM TOOLS/EDIT.COM
+python .\tools\fat16tool.py ls TOOLS
 
 # Export a DOS file back to Windows
-python .\BB_FAT16_TOOL\fat16tool.py export TEST.TXT C:\blitzBUS\TEST_FROM_DOS.TXT
+python .\tools\fat16tool.py export TEST.TXT C:\blitzBUS\TEST_FROM_DOS.TXT
 
 # Replace an existing DOS file explicitly
-python .\BB_FAT16_TOOL\fat16tool.py import C:\DOS\EDIT.COM TOOLS/EDIT.COM --replace
+python .\tools\fat16tool.py import C:\DOS\EDIT.COM TOOLS/EDIT.COM --replace
 
 # Delete file; remove empty directory
-python .\BB_FAT16_TOOL\fat16tool.py rm TOOLS/EDIT.COM
-python .\BB_FAT16_TOOL\fat16tool.py rm TOOLS
+python .\tools\fat16tool.py rm TOOLS/EDIT.COM
+python .\tools\fat16tool.py rm TOOLS
 ```
 
 Pass `--image C:\path\to\DRIVE_C.IMG` **before** the subcommand to choose a different image. Default: `O:/BLITZBUS/DRIVE_C.IMG`.
