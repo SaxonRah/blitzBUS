@@ -243,9 +243,14 @@ static bool md_pico_set_clock(void)
     if 'BLITZBUS_LCD_CONSOLE' not in pico_text:
         raise SystemExit('Expected guarded v0.4 LCD calls not found; no changes')
     cm=cmake.read_text(encoding='utf8')
+    
+    clock_khz = int(os.environ.get("BB_SYS_KHZ", "300000"))
+    if not 150000 <= clock_khz <= 400000:
+        raise SystemExit("BB_SYS_KHZ outside experimental range")
+        
     block=f'''{BEGIN}
 # The original microdos_pico target and original source files remain untouched.
-md_pico_dos(blitzbus_pico_b86_dos 0 0 300000 0 0 0 0 0 0)
+md_pico_dos(blitzbus_pico_b86_dos 0 0 {clock_khz} 0 0 0 0 0 0)
 get_target_property(_bb_src blitzbus_pico_b86_dos SOURCES)
 list(REMOVE_ITEM _bb_src "${{CMAKE_CURRENT_LIST_DIR}}/microdos_pico.c")
 list(REMOVE_ITEM _bb_src "${{MD_ROOT}}/src/system/md_dos2_system.c")
