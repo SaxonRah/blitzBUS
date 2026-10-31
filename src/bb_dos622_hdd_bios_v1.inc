@@ -8,6 +8,9 @@
 extern bool bb_sd_hdd_available(void);
 extern bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *dst,size_t size);
 extern bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *src,size_t size);
+#if BB622_SD_MULTI
+extern bool bb_sd_hdd_read_sectors(uint32_t lba,uint8_t *dst,uint32_t count);   /* BB_SD_MULTI_V1 */
+#endif
 static uint8_t bb622_hd_last_error;
 static uint32_t bb622_hd_bios_reads,bb622_hd_bios_writes;
 static void BB622_FLASH bb622_hd_result(MdX86 *c,uint8_t error,uint8_t transferred)
@@ -92,6 +95,34 @@ static bool BB622_FLASH bb622_hd_int13(MdRuntime *rt)
                (unsigned long)sec,(unsigned long)lba,(unsigned long)(lba+n-1u));
         fflush(stdout);
     }
+#if BB622_SD_MULTI
+    if(ah!=0x03u){                                   /* BB_SD_MULTI_V1: reads and verify */
+        for(i=0;i<n;){
+            uint32_t k=(uint32_t)n-i,s;
+            if(k>BB622_SD_MULTI)k=BB622_SD_MULTI;
+            if(k>1u && bb_sd_hdd_read_sectors(lba+i,bb622_multi,k)){
+                for(s=0;s<k;s++){
+                    if(ah==0x02u)md_x86_write_block(c,c->es,(uint16_t)((uint32_t)c->r[MD_X86_BX]+(i+s)*512u),bb622_multi+s*512u,512u);
+                    ++bb622_hd_bios_reads;
+                }
+                ++bb622_multi_chunks;
+                i+=k;
+                continue;
+            }
+            if(k>1u)++bb622_multi_fallbacks;
+            for(s=0;s<k;s++,i++){                    /* original single-sector path */
+                uint16_t off=(uint16_t)((uint32_t)c->r[MD_X86_BX]+i*512u);
+                if(!bb_sd_hdd_read_sector(lba+i,bb622_sector,512u)){
+                    bb622_hd_v2_fail(rt,"sd-read",ah,n,cx,dx,lba+i,0x20u,(uint8_t)i);return true;
+                }
+                if(ah==0x02u)md_x86_write_block(c,c->es,off,bb622_sector,512u);
+                ++bb622_hd_bios_reads;
+            }
+        }
+        bb622_hd_result(c,0u,n);
+        return true;
+    }
+#endif
     for(i=0;i<n;i++){
         uint16_t off=(uint16_t)((uint32_t)c->r[MD_X86_BX]+i*512u);
         if(ah==0x03u){

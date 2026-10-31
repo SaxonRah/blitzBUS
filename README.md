@@ -65,6 +65,9 @@ $env:BB_PJ_HOT_KB = '128'; .\bb.bat boot
 |---|---|---|
 | `BB_MICRODOS`, `BB_BLITZ86`, `BB_PORT` | `C:\microDOS`, `C:\blitz86_v2`, `COM5` | checkouts and serial port |
 | `BB_SD_BOOT` | `1` | boot DOS 6.22 from the SD-card images |
+| `BB_SD_SPI_HZ` | `12500000` | SD card SPI clock after LCD init; exact rates 12500000, 15000000, 18750000, 25000000 (others are refused); the log's `[bb-sd-perf]` line reports time per sector |
+| `BB_SD_MULTI` | `64` | sectors per SD command for INT 13h reads of A: and C: (one seek + one multi-block read); 0 = one sector per command, as before |
+| `BB_SYS_KHZ` | `300000` | system clock, 150000..400000 |
 | `BB_CPU` | `386` | `8086`, `186`, `286` or `386` |
 | `BB_386_NATIVE_T1` | `1` | native 386 tier 1 (needs `BB_CPU=386`) |
 | `BB_PAGED` | `1` | paged guest memory |

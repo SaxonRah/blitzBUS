@@ -6,6 +6,21 @@
 extern bool bb_sd_dos622_active(void);
 extern bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t size);
 static uint8_t __uninitialized_psram("bb622_bios_sector") bb622_sector[512];
+/* BB_SD_MULTI_V1: INT 13h reads of A: and C: move up to BB622_SD_MULTI sectors
+ * per SD command (one seek + one multi-block read) through a PSRAM buffer, like
+ * bb622_sector above. 0 = the original one-sector loops. A failed chunk is read
+ * again one sector at a time, so errors and partial counts are unchanged. */
+#ifndef BB622_SD_MULTI
+#define BB622_SD_MULTI 64u
+#endif
+#if BB622_SD_MULTI > 128u
+#error BB622_SD_MULTI must be 0..128
+#endif
+#if BB622_SD_MULTI
+extern bool bb_sd_dos622_read_sectors(uint32_t lba, uint8_t *dst, uint32_t count);
+static uint8_t __uninitialized_psram("bb622_multi") bb622_multi[BB622_SD_MULTI * 512u] __attribute__((aligned(4)));
+static uint32_t bb622_multi_chunks, bb622_multi_fallbacks;
+#endif
 static uint8_t bb622_disk_status;
 static uint32_t bb622_bios_reads;
 static uint32_t bb622_bios_failed;
@@ -137,6 +152,32 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
     if ((uint32_t)c->r[MD_X86_BX] + (uint32_t)count * 512u > 65536u) {
         bb622_status(c, 0x09u, 0u); return true;
     }
+#if BB622_SD_MULTI
+    for (i = 0; i < count; ) {
+        uint32_t k = (uint32_t)count - i, s;
+        if (k > BB622_SD_MULTI) k = BB622_SD_MULTI;
+        if (k > 1u && bb_sd_dos622_read_sectors(lba + i, bb622_multi, k)) {
+            for (s = 0; s < k; ++s) {
+                if (fn == 0x02u) md_x86_write_block(c, c->es,
+                          (uint16_t)(c->r[MD_X86_BX] + (i + s) * 512u), bb622_multi + s * 512u, 512u);
+                ++bb622_bios_reads;
+            }
+            ++bb622_multi_chunks;
+            i += k;
+            continue;
+        }
+        if (k > 1u) ++bb622_multi_fallbacks;
+        for (s = 0; s < k; ++s, ++i) {               /* original single-sector path */
+            if (!bb_sd_dos622_read_sector(lba + i, bb622_sector, sizeof bb622_sector)) {
+                ++bb622_bios_failed;
+                bb622_status(c, 0x20u, (uint8_t)i); return true;
+            }
+            if (fn == 0x02u) md_x86_write_block(c, c->es,
+                      (uint16_t)(c->r[MD_X86_BX] + i * 512u), bb622_sector, 512u);
+            ++bb622_bios_reads;
+        }
+    }
+#else
     for (i = 0; i < count; ++i) {
         if (!bb_sd_dos622_read_sector(lba + i, bb622_sector, sizeof bb622_sector)) {
             ++bb622_bios_failed;
@@ -146,6 +187,7 @@ static bool BB622_FLASH bb622_int13(MdRuntime *rt)
                   (uint16_t)(c->r[MD_X86_BX] + i * 512u), bb622_sector, 512u);
         ++bb622_bios_reads;
     }
+#endif
     bb622_status(c, 0u, count);
     return true;
 }

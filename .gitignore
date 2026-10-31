@@ -45,3 +45,5 @@ __pycache__/
 # Installer checksum/rollback history (.bb_*_state and .bb622_*_state)
 # is deliberately NOT ignored: the installed lineage requires those bytes.
 
+# per-run patched runner copies made by scripts/bb_dos_dual_launch_v2.py (bb dual)
+/scripts/.bb_dual_v2_runner_*.ps1

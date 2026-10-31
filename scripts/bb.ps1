@@ -1,6 +1,7 @@
 # blitzBUS command dispatcher. Started by bb.bat; Windows PowerShell 5.1 compatible.
 #
 #   bb boot     DOS 6.22: install, build, flash, console        (was: bb dos boot)
+#   bb dual     same, with a second window: color DOS screen + keyboard
 #   bb build    DOS 6.22: install + build firmware only
 #   bb run      DOS 2 firmware (original runner; -BuildOnly builds only)
 #   bb install  add the LCD console overlay to microDOS (reversible)
@@ -94,6 +95,8 @@ blitzBUS
 
   bb boot   [-NoBuild] [-NoFlash] [-NoInput] [-Seconds N] [-ConsoleView Screen|Events|Raw] [-Port COMx]
             DOS 6.22: install the live target, build, flash, open the console.
+  bb dual   [same options as boot] [-NoColorWindow]
+            DOS 6.22 with two windows: raw log here, color DOS screen + keyboard in a second window.
   bb build  DOS 6.22: install the live target and build the firmware only (no flash, no COM port).
   bb run    [-BuildOnly] [-Seconds N] [-Port COMx]     DOS 2 firmware (original runner).
   bb install | bb restore                              LCD console overlay in microDOS (reversible).
@@ -133,6 +136,26 @@ switch ($command) {
         Add-Default $named 'Blitz86'  $env:BB_BLITZ86
         Add-Default $named 'Port'     $env:BB_PORT
         $rc = Invoke-BBScript 'bb_live_run.ps1' $named $pos
+    }
+    'dual' {
+        # Two windows: this one keeps the raw log and owns the COM port; a second
+        # window shows the DOS screen in color and takes the keyboard.
+        $rows = Use-BBConfig
+        Show-BBConfig $rows -OverridesOnly
+        Add-Default $named 'MicroDOS' $env:BB_MICRODOS
+        Add-Default $named 'Blitz86'  $env:BB_BLITZ86
+        Add-Default $named 'Port'     $env:BB_PORT
+        $fwd = @()
+        foreach ($k in $named.Keys) {
+            if ($named[$k] -is [bool]) { if ($named[$k]) { $fwd += ('-' + $k) } }
+            else { $fwd += ('-' + $k); $fwd += [string]$named[$k] }
+        }
+        $fwd += $pos
+        $launcher = Join-Path $Scripts 'bb_dos_dual_launch_v2.py'
+        if (-not (Test-Path -LiteralPath $launcher)) { throw "Missing script: $launcher" }
+        # not piped: the runner and the color window must own real consoles
+        & python $launcher @fwd
+        $rc = [int]$LASTEXITCODE
     }
     'build' {
         $rows = Use-BBConfig

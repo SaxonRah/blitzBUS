@@ -247,6 +247,21 @@ static bool md_pico_set_clock(void)
     clock_khz = int(os.environ.get("BB_SYS_KHZ", "300000"))
     if not 150000 <= clock_khz <= 400000:
         raise SystemExit("BB_SYS_KHZ outside experimental range")
+
+    # BB_SD_SPI_HZ: SD card SPI1 clock after LCD init (sd_boot/bb_dos622_sd.inc).
+    # SPI1 runs from clk_peri: only peri/even divisors are exact, anything else
+    # would silently run at a different rate. 25 MHz is the SD-over-SPI maximum.
+    sd_hz = int(os.environ.get("BB_SD_SPI_HZ", "12500000"))
+    sd_peri = int(lcd_peri)
+    sd_ok = [sd_peri // d for d in range(2, 513, 2) if sd_peri % d == 0 and sd_peri // d <= 25000000]
+    if sd_hz not in sd_ok:
+        raise SystemExit("BB_SD_SPI_HZ=%d is not an exact SPI1 rate for clk_peri=%d; use one of %s"
+                         % (sd_hz, sd_peri, ", ".join(str(v) for v in sorted(sd_ok, reverse=True)[:6])))
+    # BB_SD_MULTI: sectors per SD command for INT 13h reads of A: and C:
+    # (src/bb_dos622_bios.inc). 0 = the original one-sector loops.
+    sd_multi = int(os.environ.get("BB_SD_MULTI", "64"))
+    if not 0 <= sd_multi <= 128:
+        raise SystemExit("BB_SD_MULTI=%d outside 0..128" % sd_multi)
         
     block=f'''{BEGIN}
 # The original microdos_pico target and original source files remain untouched.
@@ -277,7 +292,8 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     BLITZBUS_LIVE_BACKEND=1
     B86_RAM_BYTES={guest_bytes}u
     BLITZBUS_LCD_CONSOLE=1
-    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u BB_LCD_LACE={lcd_lace})
+    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u BB_LCD_LACE={lcd_lace}
+    BB622_SD_SPI_HZ={sd_hz}u BB622_SD_MULTI={sd_multi}u)
 target_sources(blitzbus_pico_b86_dos PRIVATE
     "{(root/'src/bb_lcd_console.c').as_posix()}"
     "${{MD_ROOT}}/blitzbus-overlay/mr_pico_ili9341.c"

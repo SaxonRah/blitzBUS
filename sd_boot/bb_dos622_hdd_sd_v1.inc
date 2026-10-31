@@ -152,6 +152,7 @@ static FRESULT bb_life_v2_sync(FIL *f)
 }
 /* END BB622_HDD_LIFE_V2 HELPER */
 
+#define bb_sd_hdd_read_sector bb_sd_hdd_read_sector_raw   /* BB_SD_PERF_V1 */
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 {
 #define f_lseek bb_life_v2_seek
@@ -174,7 +175,43 @@ bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 #undef f_lseek
 #undef f_read
 }
+#undef bb_sd_hdd_read_sector
+bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
+{
+    const uint32_t t0 = time_us_32();
+    const bool ok = bb_sd_hdd_read_sector_raw(lba,buf,size);
+    bb_sdp_note(0, t0, ok);
+    return ok;
+}
 
+/* BB_SD_MULTI_V1: `count` consecutive C: sectors with one seek and one f_read
+ * (one multi-block CMD18 per contiguous cluster run). Same checks and life-V2
+ * accounting as the single-sector path; the BIOS falls back to that path on
+ * failure, so error codes and partial counts stay exactly as before. */
+bool bb_sd_hdd_read_sectors(uint32_t lba,uint8_t *buf,uint32_t count)
+{
+#define f_lseek bb_life_v2_seek
+#define f_read bb_life_v2_read
+    const uint32_t t0 = time_us_32();
+    UINT got=0;
+    FRESULT fr;
+    bool ok;
+    if(!bb622_hd_open||!buf||count==0u||count>128u||lba>=BB622_HD_SECTORS||count>BB622_HD_SECTORS-lba)return false;
+    bb_life_v2_enter(1u, lba);
+    bb622_retime_spi1();
+    fr=f_lseek(&bb622_hd_fil,(FSIZE_t)lba*512u);
+    if(fr==FR_OK)fr=f_read(&bb622_hd_fil,buf,(UINT)(count*512u),&got);
+    ok = fr==FR_OK && got==count*512u;
+    if(!ok && ++bb622_hd_error_n<=8u)
+        printf("[bb622-hdd] MULTI-READ FAIL lba=%lu count=%lu fr=%d bytes=%u (falls back to single sectors)\n",
+               (unsigned long)lba,(unsigned long)count,(int)fr,(unsigned)got);
+    bb_sdp_note_n(0, t0, ok, ok ? count : 1u);
+    return ok;
+#undef f_lseek
+#undef f_read
+}
+
+#define bb_sd_hdd_write_sector bb_sd_hdd_write_sector_raw   /* BB_SD_PERF_V1 */
 bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
 {
 #define f_lseek bb_life_v2_seek
@@ -199,6 +236,14 @@ bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
 #undef f_lseek
 #undef f_write
 #undef f_sync
+}
+#undef bb_sd_hdd_write_sector
+bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
+{
+    const uint32_t t0 = time_us_32();
+    const bool ok = bb_sd_hdd_write_sector_raw(lba,buf,size);
+    bb_sdp_note(1, t0, ok);
+    return ok;
 }
 
 /* BB_DOS622_PERF_V1: flush pending HDD writes (call when idle / on exit) */

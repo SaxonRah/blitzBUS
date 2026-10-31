@@ -12,12 +12,17 @@
     BB_BLITZ86       = 'C:\blitz86_v2'    # blitz86 checkout (CPU core)
     BB_PORT          = 'COM5'             # Pico USB serial port
     BB_SD_BOOT       = '1'                # boot DOS 6.22 from the SD card images
+    BB_SD_SPI_HZ     = '18750000'         # SD card SPI clock after LCD init. Exact rates with
+                                          # clk_peri 150 MHz: 12500000 15000000 18750000 25000000
+	BB_META_KB 		 = '640'
+    BB_SD_MULTI      = '64'               # sectors per SD command for DOS disk reads (0 = one at a time)
+    BB_SYS_KHZ       = '300000'           # system clock (scripts\install_live.py: 150000..400000)
 
     # --- emulated CPU and memory (read by scripts\install_live.py) --------
     BB_CPU           = '386'              # 8086 | 186 | 286 | 386
     BB_386_NATIVE_T1 = '1'                # native 386 tier 1 (requires BB_CPU=386)
     BB_PAGED         = '1'                # paged guest memory
-    BB_GUEST_KB      = '4096'             # guest RAM
+    BB_GUEST_KB      = '4544'             # guest RAM
     BB_CODE_KB       = '128'              # real-mode JIT code cache
     BB_BBUF          = '0'                # block buffer in SRAM (0 = off)
     BB_PM_IRQ0       = '0'                # keep 0: continuous protected-mode IRQ0 delivery is unsafe

@@ -17,7 +17,8 @@ static uint32_t bb622_retime_count;
 
 /* BB_DOS622_PERF_V1: 12.5 MHz (25 MHz gave FR_DISK_ERR reads on the
    test card). -DBB622_SD_SPI_HZ=... to try another rate. Only retime when
-   the rate is wrong. */
+   the rate is wrong. BB_SD_SPI_HZ in bb.config.psd1 sets it (validated by
+   scripts/install_live.py to an exact clk_peri/even rate, at most 25 MHz). */
 #ifndef BB622_SD_SPI_HZ
 #define BB622_SD_SPI_HZ 12500000u
 #endif
@@ -36,7 +37,36 @@ static void bb622_retime_spi1(void)
 
 bool bb_sd_dos622_active(void) { return bb622_disk_open; }
 
-bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
+/* BB_SD_PERF_V1: time spent in the DOS 6.22 SD sector calls (A:/B: images and
+ * C: image), so SD clock settings can be compared. 32-bit time, no division
+ * except in the report printed every 4096 operations and on the first errors. */
+#include "hardware/timer.h"
+static uint32_t bb_sdp_rd_n, bb_sdp_rd_us, bb_sdp_wr_n, bb_sdp_wr_us, bb_sdp_err, bb_sdp_rd_max;
+static uint32_t bb_sdp_rd_calls, bb_sdp_next = 4096u;   /* BB_SD_MULTI_V1: commands; next report */
+/* n sectors moved by one call (n > 1 only for the multi-sector reads) */
+static void bb_sdp_note_n(int write, uint32_t t0, bool ok, uint32_t n)
+{
+    const uint32_t dt = time_us_32() - t0;
+    if (write) { bb_sdp_wr_n += n; bb_sdp_wr_us += dt; }
+    else { bb_sdp_rd_n += n; bb_sdp_rd_us += dt; ++bb_sdp_rd_calls; if (dt > bb_sdp_rd_max) bb_sdp_rd_max = dt; }
+    if (!ok && ++bb_sdp_err <= 4u)
+        printf("[bb-sd-perf] ERROR #%lu on %s at spi1=%lu Hz (BB622_SD_SPI_HZ=%lu)\n",
+               (unsigned long)bb_sdp_err, write ? "write" : "read",
+               (unsigned long)spi_get_baudrate(spi1), (unsigned long)BB622_SD_SPI_HZ);
+    if (bb_sdp_rd_n + bb_sdp_wr_n >= bb_sdp_next) {
+        bb_sdp_next = bb_sdp_rd_n + bb_sdp_wr_n + 4096u;
+        printf("[bb-sd-perf] spi1=%lu reads=%lu read-us/sector=%lu read-max-us=%lu sectors/read-call=%lu writes=%lu write-us/sector=%lu errors=%lu\n",
+               (unsigned long)spi_get_baudrate(spi1), (unsigned long)bb_sdp_rd_n,
+               (unsigned long)(bb_sdp_rd_n ? bb_sdp_rd_us / bb_sdp_rd_n : 0u), (unsigned long)bb_sdp_rd_max,
+               (unsigned long)(bb_sdp_rd_calls ? bb_sdp_rd_n / bb_sdp_rd_calls : 0u),
+               (unsigned long)bb_sdp_wr_n, (unsigned long)(bb_sdp_wr_n ? bb_sdp_wr_us / bb_sdp_wr_n : 0u),
+               (unsigned long)bb_sdp_err);
+    }
+}
+static void bb_sdp_note(int write, uint32_t t0, bool ok) { bb_sdp_note_n(write, t0, ok, 1u); }
+#define bb_sd_dos622_read_sector bb_sd_dos622_read_sector_raw
+
+bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)   /* = ..._raw (BB_SD_PERF_V1) */
 {
     FRESULT rc;
     UINT got = 0;
@@ -64,6 +94,40 @@ bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
     ++bb622_read_calls;
     if (bb622_read_calls <= 8u) printf("[bb-dos622] read lba=%lu OK\n", (unsigned long)lba);
     return true;
+}
+#undef bb_sd_dos622_read_sector
+bool bb_sd_dos622_read_sector(uint32_t lba, uint8_t *dst, size_t length)
+{
+    const uint32_t t0 = time_us_32();
+    const bool ok = bb_sd_dos622_read_sector_raw(lba, dst, length);
+    bb_sdp_note(0, t0, ok);
+    return ok;
+}
+
+/* BB_SD_MULTI_V1: `count` consecutive A: sectors with one seek and one f_read.
+ * FatFs reads whole sectors straight into dst and issues one multi-block
+ * read (CMD18) per contiguous cluster run. Same checks and error messages as
+ * the single-sector path; the BIOS falls back to that path on failure. */
+bool bb_sd_dos622_read_sectors(uint32_t lba, uint8_t *dst, uint32_t count)
+{
+    const uint32_t t0 = time_us_32();
+    FRESULT rc;
+    UINT got = 0;
+    bool ok = false;
+    if (!bb622_disk_open || bb622_swap_a_ejected || !dst || count == 0u || count > 128u ||
+        lba >= 2880u || count > 2880u - lba) return false;
+    bb622_retime_spi1();
+    rc = f_lseek(bb622_swap_active, (FSIZE_t)lba * 512u);
+    if (rc == FR_OK) rc = f_read(bb622_swap_active, dst, (UINT)(count * 512u), &got);
+    ok = rc == FR_OK && got == count * 512u;
+    if (!ok) {
+        ++bb622_read_errors;
+        if (bb622_read_errors <= 8u)
+            printf("[bb-dos622] disk MULTI-READ ERROR lba=%lu count=%lu fr=%d bytes=%u spi1=%lu (falls back to single sectors)\n",
+                   (unsigned long)lba, (unsigned long)count, (int)rc, (unsigned)got, (unsigned long)spi_get_baudrate(spi1));
+    }
+    bb_sdp_note_n(0, t0, ok, ok ? count : 1u);
+    return ok;
 }
 
 /* BB_DOS622_SWAP_LCD_V2: floppy A media exchange, DOS622 only.
