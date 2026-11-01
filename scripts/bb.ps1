@@ -56,6 +56,60 @@ function Show-BBConfig($rows, [switch]$OverridesOnly) {
 }
 
 # '-Name value' / '-Switch' / positional -> splattable hashtable + array
+# BB_BUILD_GUARD_V1: window variables that differ from bb.config.psd1 (or are
+# not in it) silently changed or blocked builds. Refuse them unless -AllowOverride.
+function Test-BBOverrides($rows, [hashtable]$named) {
+    $allow = $named.ContainsKey('AllowOverride')
+    if ($allow) { $named.Remove('AllowOverride') }
+    $ov = @($rows | Where-Object { $_.Source -ceq 'WINDOW OVERRIDE' -or $_.Source -ceq 'WINDOW (not in config)' })
+    if ($ov.Count -eq 0) { return $true }
+    if ($allow) {
+        Write-Host '[bb] building WITH these window values (-AllowOverride):'
+        foreach ($r in $ov) { Write-Host ('       {0,-17} = {1,-12} {2}' -f $r.Name, $r.Value, $r.Source) }
+        return $true
+    }
+    Write-Host '[bb] STOP: this window has BB_* values that are not your bb.config.psd1 settings:'
+    foreach ($r in $ov) { Write-Host ('       {0,-17} = {1,-12} {2}' -f $r.Name, $r.Value, $r.Source) }
+    Write-Host '       Clear them:   Get-ChildItem Env:BB_* | Remove-Item'
+    Write-Host '       or put the values into bb.config.psd1,'
+    Write-Host '       or run again with -AllowOverride to build with them on purpose.'
+    return $false
+}
+
+# BB_BUILD_GUARD_V1: install -> reconfigure -> build -> verify, all output also
+# in logs\bb-build-<time>.txt. Returns 0 only when the built firmware provably
+# uses the definitions install_live.py wrote.
+function Invoke-BBBuildPipeline {
+    $md = $env:BB_MICRODOS; $bz = $env:BB_BLITZ86
+    $build = [IO.Path]::Combine($md, 'build-pico', 'out')
+    $logs = Join-Path $Root 'logs'
+    New-Item -ItemType Directory -Force -Path $logs | Out-Null
+    $blog = Join-Path $logs ('bb-build-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
+    Write-Host "[bb] build log: $blog"
+    $installer = Join-Path $Scripts 'install_live.py'
+    $verifier = Join-Path $Scripts 'bb_verify_build.py'
+    $steps = @(
+        @('install',     { & python $installer --microdos $md --blitz86 $bz 2>&1 }),
+        @('reconfigure', { & cmake '-DCMAKE_SUPPRESS_REGENERATION=OFF' $build 2>&1 }),
+        @('build',       { & cmake --build $build --target blitzbus_pico_b86_dos 2>&1 }),
+        @('verify',      { & python $verifier --microdos $md --blitzbus $Root 2>&1 }))
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'            # native stderr lines are output, not errors
+    try {
+        foreach ($st in $steps) {
+            Add-Content -LiteralPath $blog -Value ('=== ' + $st[0]) -Encoding UTF8
+            $global:LASTEXITCODE = 0
+            & $st[1] | ForEach-Object { $line = "$_"; Write-Host $line; Add-Content -LiteralPath $blog -Value $line -Encoding UTF8 }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host ("[bb] FAILED at step '{0}' (exit {1}). Full output: {2}" -f $st[0], $LASTEXITCODE, $blog)
+                return 1
+            }
+        }
+    } finally { $ErrorActionPreference = $eap }
+    Write-Host ('[bb] built and verified ' + [IO.Path]::Combine($build, 'blitzbus_pico_b86_dos.uf2'))
+    return 0
+}
+
 function Split-BBArgs([object[]]$list) {
     $named = @{}; $pos = @(); $i = 0
     while ($i -lt $list.Count) {
@@ -97,7 +151,10 @@ blitzBUS
             DOS 6.22: install the live target, build, flash, open the console.
   bb dual   [same options as boot] [-NoColorWindow]
             DOS 6.22 with two windows: raw log here, color DOS screen + keyboard in a second window.
-  bb build  DOS 6.22: install the live target and build the firmware only (no flash, no COM port).
+  bb build  DOS 6.22: install, reconfigure, build and verify the firmware only (no flash, no COM port).
+            boot, dual and build stop if this window has BB_* values that differ from
+            bb.config.psd1; -AllowOverride builds with them on purpose. Build output is
+            saved to logs\bb-build-<time>.txt.
   bb run    [-BuildOnly] [-Seconds N] [-Port COMx]     DOS 2 firmware (original runner).
   bb install | bb restore                              LCD console overlay in microDOS (reversible).
 
@@ -132,6 +189,11 @@ switch ($command) {
     'boot' {
         $rows = Use-BBConfig
         Show-BBConfig $rows -OverridesOnly
+        if (-not (Test-BBOverrides $rows $named)) { exit 3 }
+        if (-not $named.ContainsKey('NoBuild')) {      # BB_BUILD_GUARD_V1
+            if ((Invoke-BBBuildPipeline) -ne 0) { exit 1 }
+            $named['NoBuild'] = $true                     # the runner flashes the verified build
+        }
         Add-Default $named 'MicroDOS' $env:BB_MICRODOS
         Add-Default $named 'Blitz86'  $env:BB_BLITZ86
         Add-Default $named 'Port'     $env:BB_PORT
@@ -142,6 +204,11 @@ switch ($command) {
         # window shows the DOS screen in color and takes the keyboard.
         $rows = Use-BBConfig
         Show-BBConfig $rows -OverridesOnly
+        if (-not (Test-BBOverrides $rows $named)) { exit 3 }
+        if (-not $named.ContainsKey('NoBuild')) {      # BB_BUILD_GUARD_V1
+            if ((Invoke-BBBuildPipeline) -ne 0) { exit 1 }
+            $named['NoBuild'] = $true
+        }
         Add-Default $named 'MicroDOS' $env:BB_MICRODOS
         Add-Default $named 'Blitz86'  $env:BB_BLITZ86
         Add-Default $named 'Port'     $env:BB_PORT
@@ -160,12 +227,8 @@ switch ($command) {
     'build' {
         $rows = Use-BBConfig
         Show-BBConfig $rows -OverridesOnly
-        $rc = Invoke-BBPython (Join-Path $Scripts 'install_live.py') @('--microdos', $env:BB_MICRODOS, '--blitz86', $env:BB_BLITZ86)
-        if ($rc -eq 0) {
-            & cmake --build ([IO.Path]::Combine($env:BB_MICRODOS, 'build-pico', 'out')) --target blitzbus_pico_b86_dos
-            $rc = $LASTEXITCODE
-            if ($rc -eq 0) { Write-Host ('[bb] built ' + [IO.Path]::Combine($env:BB_MICRODOS, 'build-pico', 'out', 'blitzbus_pico_b86_dos.uf2')) }
-        }
+        if (-not (Test-BBOverrides $rows $named)) { exit 3 }
+        $rc = Invoke-BBBuildPipeline                    # BB_BUILD_GUARD_V1
     }
     'run' {
         $rows = Use-BBConfig

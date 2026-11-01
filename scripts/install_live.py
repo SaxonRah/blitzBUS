@@ -83,8 +83,8 @@ def main():
     guest_bytes=max(int(guest_kb)*1024,0x110020)
     if not code_kb.isdigit() or not 64<=int(code_kb)<=304:
         raise SystemExit("BB_CODE_KB must be 64..288 (SRAM code buffer, KiB)")
-    if lcd_peri not in ("48000000","150000000"):
-        raise SystemExit("BB_LCD_PERI_HZ must be 48000000 or 150000000")
+    if lcd_peri not in ("48000000","150000000","sys/3"):
+        raise SystemExit("BB_LCD_PERI_HZ must be 48000000, 150000000 or sys/3")
     if lcd_hz not in ("24000000","40000000","75000000"):
         raise SystemExit("BB_LCD_SPI_HZ must be 24000000, 40000000 or 75000000")
     root=Path(__file__).resolve().parents[1]
@@ -173,6 +173,13 @@ def main():
     else:
         pico_text=pico_text.replace(guest_decl+'\n    g_guest[MD_GUEST_BYTES];',
             '__uninitialized_psram("md_guest") __attribute__((aligned(64)))\n    g_guest[B86_RAM_BYTES];',1)
+    # BB_PSRAM_HZ_V1: route the PSRAM timing call through BB_PSRAM_MAX_HZ
+    psram_call = '    if (psram_configure_params(PICO_DEFAULT_PSRAM_MAX_FREQ,'
+    if pico_text.count(psram_call) != 1:
+        raise SystemExit('PSRAM timing call changed; originals untouched')
+    pico_text = pico_text.replace(psram_call,
+        '#ifndef BB_PSRAM_MAX_HZ\n#define BB_PSRAM_MAX_HZ PICO_DEFAULT_PSRAM_MAX_FREQ\n#endif\n'
+        '    if (psram_configure_params(BB_PSRAM_MAX_HZ,', 1)
     # Send the live counters on every Ctrl+] stats request, not only milestones.
     # Generate *actual C lines*.  The C format strings use escaped newline bytes.
     stats_block = r'''g_con.stats_requested=false;md_stats(start_us);
@@ -223,10 +230,33 @@ static void bb_set_vreg_for_clock(uint32_t khz)
     bb_vreg_mv_set = mv;
 }
 
+/* BB_CLK400_V1: above 300 MHz, slow the flash interface (QMI window 0)
+ * BEFORE raising clk_sys so the flash never runs above ~133 MHz: divider
+ * ceil(f/133 MHz), read delay divider-1, min deselect >= 7 (the values used
+ * in Michael Bell's RP2350 overclocking tests). Runs from SRAM with IRQs off.
+ * At 300 MHz and below nothing is touched. */
+#include "hardware/structs/qmi.h"
+#include "hardware/sync.h"
+static __attribute__((noinline)) void __not_in_flash_func(bb_flash_timing_for_clock)(uint32_t khz)
+{
+    uint32_t t, need, irq;
+    if (khz <= 300000u) return;
+    t = qmi_hw->m[0].timing;
+    need = (khz + 132999u) / 133000u;
+    if (need <= (t & 0xFFu)) return;
+    irq = save_and_disable_interrupts();
+    t = (t & ~0xFFu) | need;
+    t = (t & ~(7u << 8)) | ((need - 1u < 7u ? need - 1u : 7u) << 8);
+    if (((t >> 12) & 31u) < 7u) t = (t & ~(31u << 12)) | (7u << 12);
+    qmi_hw->m[0].timing = t;
+    restore_interrupts(irq);
+}
+
 static bool md_pico_set_clock(void)
 {
 #if MICRODOS_PICO_SYS_KHZ > 0
     bb_set_vreg_for_clock(MICRODOS_PICO_SYS_KHZ);
+    bb_flash_timing_for_clock(MICRODOS_PICO_SYS_KHZ);
     if (!set_sys_clock_khz(MICRODOS_PICO_SYS_KHZ, false)) return false;''',1)
     psram_say='''    md_say("  psram:   %lu KiB'''
     if pico_text.count(psram_say)!=1:
@@ -247,16 +277,73 @@ static bool md_pico_set_clock(void)
     clock_khz = int(os.environ.get("BB_SYS_KHZ", "300000"))
     if not 150000 <= clock_khz <= 400000:
         raise SystemExit("BB_SYS_KHZ outside experimental range")
+    # BB_CLK400_V1: clk_peri (LCD and SD SPI) must be an EXACT divide of clk_sys:
+    # a fractional divider jitters the SD clock. sys/3 = 133.3 MHz at 400 MHz.
+    if lcd_peri == "sys/3":
+        peri_div, peri_num = 3, clock_khz * 1000 // 3
+    else:
+        peri_div, peri_num = 0, int(lcd_peri)
+        if peri_num == 150000000 and (clock_khz * 1000) % 150000000 != 0:
+            raise SystemExit("BB_LCD_PERI_HZ=150000000 needs an exact divider: clk_sys 150, 300 or 450 MHz. "
+                             "With BB_SYS_KHZ=%d use BB_LCD_PERI_HZ=sys/3" % clock_khz)
 
     # BB_SD_SPI_HZ: SD card SPI1 clock after LCD init (sd_boot/bb_dos622_sd.inc).
     # SPI1 runs from clk_peri: only peri/even divisors are exact, anything else
     # would silently run at a different rate. 25 MHz is the SD-over-SPI maximum.
     sd_hz = int(os.environ.get("BB_SD_SPI_HZ", "12500000"))
-    sd_peri = int(lcd_peri)
-    sd_ok = [sd_peri // d for d in range(2, 513, 2) if sd_peri % d == 0 and sd_peri // d <= 25000000]
-    if sd_hz not in sd_ok:
-        raise SystemExit("BB_SD_SPI_HZ=%d is not an exact SPI1 rate for clk_peri=%d; use one of %s"
-                         % (sd_hz, sd_peri, ", ".join(str(v) for v in sorted(sd_ok, reverse=True)[:6])))
+    sd_peri = peri_num
+    # BB_CLK400_V1: the SPI driver always rounds DOWN to clk_peri/(even divider);
+    # report the rate that will really run (with clk_peri 150 MHz: exactly as before).
+    sd_div = next((d for d in range(2, 513, 2) if sd_peri / d <= sd_hz), None)
+    if sd_div is None or sd_hz > 25000000:
+        raise SystemExit("BB_SD_SPI_HZ=%d not possible with clk_peri=%d" % (sd_hz, sd_peri))
+    print("[blitzBUS] SD clock: requested %d Hz -> %.0f Hz (clk_peri %d / %d)" % (sd_hz, sd_peri / sd_div, sd_peri, sd_div))
+    # BB_PSRAM_HZ_V1: BB_PSRAM_MAX_HZ = maximum PSRAM clock handed to the SDK's
+    # psram_configure_params(), which derives divider and read delay itself.
+    # Unset = the board default. At clk_sys 300 MHz only LOWER values change
+    # anything (default 133 MHz -> divider 3 = 100 MHz); for measurements.
+    # BB_PJ_HASH_V1: native dispatch table entries (blitz86 B86_PJ_HASH). Every
+    # entry costs 8 bytes of SRAM state: 512 -> 8 KiB (default), 2048 -> 20 KiB.
+    # Other sizes need blitz86 V96 (B86_PJ_V96_HASH_OK) and should take the
+    # extra SRAM from the hot tier (BB_PJ_HOT_KB 96 -> 84 for 2048).
+    pj_hash = os.environ.get("BB_PJ_HASH", "512")
+    if pj_hash not in ("512", "1024", "2048", "4096"):
+        raise SystemExit("BB_PJ_HASH must be 512, 1024, 2048 or 4096")
+    pj_state_bytes = 8192 + 8 * (int(pj_hash) - 512)
+    pj_hash_defs = "" if pj_hash == "512" else " B86_PJ_V96_HASH_OK=1"
+    pj_hash_defs += " BB_PJ_STATE_BYTES=%du" % pj_state_bytes
+    # BB_PJ_PM16_V98: 16-bit context tables (blitz86 V97/V98), in the PSRAM
+    # code-cache tail: contexts x entries x 8 bytes. Unset = blitz86 defaults.
+    pm16_ent = os.environ.get("BB_PJ_PM16_ENT", "")
+    pm16_ctx = os.environ.get("BB_PJ_PM16_CTX", "")
+    if pm16_ent and pm16_ent not in ("128", "256", "512", "1024", "2048", "4096"):
+        raise SystemExit("BB_PJ_PM16_ENT must be a power of two 128..4096 (or unset)")
+    if pm16_ctx and (not pm16_ctx.isdigit() or not 4 <= int(pm16_ctx) <= 32):
+        raise SystemExit("BB_PJ_PM16_CTX must be 4..32 (or unset)")
+    if pm16_ent: pj_hash_defs += " B86_PJ_V98_PM16_ENT=%su" % pm16_ent
+    if pm16_ctx: pj_hash_defs += " B86_PJ_V97_PM16_CTX=%su" % pm16_ctx
+    psram_hz = os.environ.get("BB_PSRAM_MAX_HZ", "")
+    if psram_hz and (not psram_hz.isdigit() or not 50000000 <= int(psram_hz) <= 133000000):
+        raise SystemExit("BB_PSRAM_MAX_HZ must be 50000000..133000000 (or unset)")
+    # BB_SD_SAFETY_V1: 18.75 MHz crashed the Pico and damaged the SD card's own
+    # filesystem on 2026-10-31 (DOS622_HDD.IMG vanished). Faster than 12.5 MHz
+    # only with an explicit BB_SD_FAST_OK=1, after backing up the card.
+    if sd_hz > 12500000 and os.environ.get("BB_SD_FAST_OK", "0") != "1":
+        raise SystemExit("BB_SD_SPI_HZ=%d is above 12.5 MHz. 18.75 MHz crashed the Pico and corrupted the SD card "
+                         "(2026-10-31). Back up the card, then set BB_SD_FAST_OK=1 to allow it." % sd_hz)
+    # BB_FAST_V1: blitz86 build switches.
+    #   BB_MEASURE_V90 / BB_MEASURE_V91 = per-instruction measurement counters
+    #   (interpreter histogram, 16-bit try outcomes). They cost ~3 s per long
+    #   loading run (~7%), so they are off unless asked for.
+    #   BB_PM16_ADAPTIVE = 1: the adaptive 16-bit cooldown (sends 16-bit code to
+    #   the interpreter when native runs are short); 0: always native.
+    #   BB_PM16_LINK = 1: V93 chaining of 16-bit protected-mode blocks; 0: off
+    #   (byte-identical to V92).
+    fast_sw = {}
+    for name, default in (("BB_MEASURE_V90", "0"), ("BB_MEASURE_V91", "0"), ("BB_PM16_ADAPTIVE", "1"), ("BB_PM16_LINK", "1")):
+        fast_sw[name] = os.environ.get(name, default)
+        if fast_sw[name] not in ("0", "1"):
+            raise SystemExit("%s must be 0 or 1 (got %r)" % (name, fast_sw[name]))
     # BB_SD_MULTI: sectors per SD command for INT 13h reads of A: and C:
     # (src/bb_dos622_bios.inc). 0 = the original one-sector loops.
     sd_multi = int(os.environ.get("BB_SD_MULTI", "64"))
@@ -286,14 +373,15 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     BB_CODE_BYTES={int(code_kb)*1024}u BB_HOT_BYTES={40960 if paged=="1" else 32768}u BB_HOT_THRESHOLD={hot}u BB_CPU_MODEL={cpu_model}u BB_NO_CHAIN={no_chain} BB_CHAIN_PROFILE=1
     {"B86_PAGED=1" if paged=="1" else ""} BB_BBUF_SRAM={bbuf}
     B86_CALLOC=bb_meta_calloc B86_FREE=bb_meta_free B86_NOW=bb_now_us B86_MISSES=bb_xip_misses
-    BB386_PM_IRQ0={os.environ.get("BB_PM_IRQ0","1")} BB386_PM_KBD={os.environ.get("BB_PM_KBD","1")} B86_RAM_FUNCS=1 B86_PJ={os.environ.get("BB_PJ","1")} B86_PJ_HASH=512u B86_PJ_CPS=256u{(" B86_PJ_MAXI="+os.environ["BB_PJ_MAXI"]) if os.environ.get("BB_PJ_MAXI") else ""}{(" B86_PJ_CHAIN="+os.environ["BB_PJ_CHAIN"]) if os.environ.get("BB_PJ_CHAIN") else ""} BB_PJ_PSRAM={os.environ.get("BB_PJ_PSRAM","1")}{(" BB_PJ_CODE_KB="+os.environ["BB_PJ_CODE_KB"]) if os.environ.get("BB_PJ_CODE_KB") else ""}{(" BB_PJ_HOT_KB="+os.environ["BB_PJ_HOT_KB"]) if os.environ.get("BB_PJ_HOT_KB") else ""}{(" BB_META_BYTES="+str(int(os.environ["BB_META_KB"])*1024)+"u") if os.environ.get("BB_META_KB") else ""} B86_PM_RAM={os.environ.get("BB_PM_RAM","1")} B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
+    BB386_PM_IRQ0={os.environ.get("BB_PM_IRQ0","1")} BB386_PM_KBD={os.environ.get("BB_PM_KBD","1")} B86_RAM_FUNCS=1 B86_PJ={os.environ.get("BB_PJ","1")} B86_PJ_HASH={pj_hash}u{pj_hash_defs} B86_PJ_CPS=256u{(" B86_PJ_MAXI="+os.environ["BB_PJ_MAXI"]) if os.environ.get("BB_PJ_MAXI") else ""}{(" B86_PJ_CHAIN="+os.environ["BB_PJ_CHAIN"]) if os.environ.get("BB_PJ_CHAIN") else ""} BB_PJ_PSRAM={os.environ.get("BB_PJ_PSRAM","1")}{(" BB_PJ_CODE_KB="+os.environ["BB_PJ_CODE_KB"]) if os.environ.get("BB_PJ_CODE_KB") else ""}{(" BB_PJ_HOT_KB="+os.environ["BB_PJ_HOT_KB"]) if os.environ.get("BB_PJ_HOT_KB") else ""}{(" BB_META_BYTES="+str(int(os.environ["BB_META_KB"])*1024)+"u") if os.environ.get("BB_META_KB") else ""} B86_PM_RAM={os.environ.get("BB_PM_RAM","1")} B86_TV_SRAM={tv_sram} BB_PC_PROFILE={pc_prof}{mprof_defs}{pin_defs}
     PICO_STACK_SIZE=0x1000 PICO_CORE1_STACK_SIZE=0x1000
     MICRODOS_SYSTEM_ENABLE_AOT=0 MICRODOS_SYSTEM_ENABLE_CACHE=0
     BLITZBUS_LIVE_BACKEND=1
     B86_RAM_BYTES={guest_bytes}u
     BLITZBUS_LCD_CONSOLE=1
-    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={lcd_peri}u BB_LCD_LACE={lcd_lace}
-    BB622_SD_SPI_HZ={sd_hz}u BB622_SD_MULTI={sd_multi}u)
+    MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={peri_num}u{(" BB_LCD_PERI_SYSDIV="+str(peri_div)) if peri_div else ""} BB_LCD_LACE={lcd_lace}
+    BB622_SD_SPI_HZ={sd_hz}u BB622_SD_MULTI={sd_multi}u
+    B86_V90_INTERP_HIST={fast_sw["BB_MEASURE_V90"]} B86_PJ_V91_PM16={fast_sw["BB_MEASURE_V91"]} BB_PJ_PM16_ADAPTIVE={fast_sw["BB_PM16_ADAPTIVE"]} B86_PJ_V93_PM16_LINK={fast_sw["BB_PM16_LINK"]}{(" BB_PSRAM_MAX_HZ="+psram_hz+"u") if psram_hz else ""})
 target_sources(blitzbus_pico_b86_dos PRIVATE
     "{(root/'src/bb_lcd_console.c').as_posix()}"
     "${{MD_ROOT}}/blitzbus-overlay/mr_pico_ili9341.c"
@@ -311,6 +399,11 @@ pico_set_program_name(blitzbus_pico_b86_dos "blitzBUS DOS + blitz86 gated")
     else:
         cm+='\n'+block+'\n'
     cmake.write_text(cm,encoding='utf8')
+    # BB_BUILD_GUARD_V1: the exact definitions just written, one per line, so
+    # scripts/bb_verify_build.py can prove the compiler really uses them.
+    _d0=block.index('target_compile_definitions(blitzbus_pico_b86_dos PRIVATE')
+    _d1=block.index(')',_d0)
+    (gen/'bb_expected_defines.txt').write_text('\n'.join(block[_d0:_d1].split()[2:])+'\n',encoding='utf8')
     import sys
     sys.path.insert(0, str(root/'sd_boot'))
     from bb_sd_overlay import apply as bb_sd_apply, disable as bb_sd_disable

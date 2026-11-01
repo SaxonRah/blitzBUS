@@ -10,6 +10,8 @@ extern bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *dst,size_t size);
 extern bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *src,size_t size);
 #if BB622_SD_MULTI
 extern bool bb_sd_hdd_read_sectors(uint32_t lba,uint8_t *dst,uint32_t count);   /* BB_SD_MULTI_V1 */
+extern bool bb_sd_hdd_write_sectors(uint32_t lba,const uint8_t *src,uint32_t count);   /* BB_SD_MULTIW_V1 */
+static uint32_t bb622_multi_wchunks, bb622_multi_wfallbacks;
 #endif
 static uint8_t bb622_hd_last_error;
 static uint32_t bb622_hd_bios_reads,bb622_hd_bios_writes;
@@ -96,6 +98,35 @@ static bool BB622_FLASH bb622_hd_int13(MdRuntime *rt)
         fflush(stdout);
     }
 #if BB622_SD_MULTI
+    if(ah==0x03u){                                   /* BB_SD_MULTIW_V1: writes */
+        for(i=0;i<n;){
+            uint32_t k=(uint32_t)n-i,s;
+            if(k>BB622_SD_MULTI)k=BB622_SD_MULTI;
+            if(k>1u){
+                for(s=0;s<k;s++){
+                    const uint16_t off=(uint16_t)((uint32_t)c->r[MD_X86_BX]+(i+s)*512u);
+                    for(j=0;j<512u;j++)bb622_multi[s*512u+j]=md_x86_read8(c,c->es,(uint16_t)(off+j));
+                }
+                if(bb_sd_hdd_write_sectors(lba+i,bb622_multi,k)){
+                    bb622_hd_bios_writes+=k;
+                    ++bb622_multi_wchunks;
+                    i+=k;
+                    continue;
+                }
+                ++bb622_multi_wfallbacks;
+            }
+            for(s=0;s<k;s++,i++){                    /* original single-sector path */
+                uint16_t off=(uint16_t)((uint32_t)c->r[MD_X86_BX]+i*512u);
+                for(j=0;j<512u;j++)bb622_sector[j]=md_x86_read8(c,c->es,(uint16_t)(off+j));
+                if(!bb_sd_hdd_write_sector(lba+i,bb622_sector,512u)){
+                    bb622_hd_v2_fail(rt,"sd-write",ah,n,cx,dx,lba+i,0x20u,(uint8_t)i);return true;
+                }
+                ++bb622_hd_bios_writes;
+            }
+        }
+        bb622_hd_result(c,0u,n);
+        return true;
+    }
     if(ah!=0x03u){                                   /* BB_SD_MULTI_V1: reads and verify */
         for(i=0;i<n;){
             uint32_t k=(uint32_t)n-i,s;

@@ -156,7 +156,27 @@ void bb_lcd_console_init(void){
        USB's independent 48 MHz clock and the 300 MHz CPU clock are untouched.
        Use BB_LCD_PERI_HZ=48000000 at build time for the previous behavior.
        All clock adjustments occur before any SPI or DMA initialization. */
-#if BB_LCD_PERI_HZ == 150000000u
+#if defined(BB_LCD_PERI_SYSDIV) && BB_LCD_PERI_SYSDIV > 0
+    {   /* BB_CLK400_V1: clk_peri = clk_sys / N with an exact integer divider
+           (no fractional jitter on the LCD and SD SPI clocks), e.g. 400/3. */
+        const uint32_t sys_hz=clock_get_hz(clk_sys);
+        const uint32_t want=sys_hz/(uint32_t)BB_LCD_PERI_SYSDIV;
+        const bool ok=clock_configure(clk_peri,0u,
+                CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                sys_hz,want);
+        printf("[bb-clk400] clk-peri = clk-sys/%u: sys=%lu want=%lu result=%s actual=%lu\n",
+            (unsigned)BB_LCD_PERI_SYSDIV,(unsigned long)sys_hz,(unsigned long)want,
+            ok?"OK":"FALLBACK",(unsigned long)clock_get_hz(clk_peri));fflush(stdout);
+        if (!ok) {
+            const bool fallback=clock_configure(clk_peri,0u,
+                CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS,
+                sys_hz,48000000u);
+            printf("[bb-v30-clock] fallback-48 result=%s actual=%lu\n",
+                fallback?"OK":"FAILED",(unsigned long)clock_get_hz(clk_peri));
+            fflush(stdout);
+        }
+    }
+#elif BB_LCD_PERI_HZ == 150000000u
     {
         const uint32_t sys_hz=clock_get_hz(clk_sys);
         const bool ok=(sys_hz >= 150000000u) &&
@@ -322,6 +342,24 @@ static uint8_t bb_v27_was_vga;
 static volatile uint32_t bb_v27_frames;
 static volatile uint32_t bb_v27_strips;
 static unsigned bb_v32_field_parity;
+/* BB_V93_GAME_FPS: Descent's real frame rate. Core 1 hashes every guest
+ * framebuffer row it converts; a field whose hash differs from the previous
+ * field of the same parity shows a new picture. Counted per parity; the
+ * report uses the larger count, so a game frame is never counted twice and a
+ * change seen by only one parity still counts. = game frames/s, exact while
+ * the game stays below the LCD's full-frame rate (15/s interlaced). Core 1
+ * writes, core 0 only reads the counters. */
+static uint32_t bb_v93_hash;                       /* core 1: current field */
+static uint32_t bb_v93_last[2];                    /* core 1: last hash per parity */
+static volatile uint32_t bb_v93_changed[2];
+static uint32_t bb_v93_report_changed[2];
+static inline void bb_v93_row(const uint8_t *row)
+{
+    const uint32_t *w = (const uint32_t *)(const void *)row;
+    uint32_t h = bb_v93_hash;
+    for (unsigned k = 0u; k < 80u; ++k) h = (h ^ w[k]) * 0x01000193u;
+    bb_v93_hash = h;
+}
 /* Core 1 owns these monotonically increasing counters; Core 0 only reads. */
 static volatile uint32_t bb_v29_stage; /* 0 idle, 1 convert, 2 DMA begin, 3 DMA wait, 4 completed */
 static volatile uint32_t bb_v29_heartbeat_us;
@@ -366,6 +404,7 @@ static void bb_v27_convert(unsigned top, uint16_t *dst) {
         return;
     }
     const unsigned src_y=(top*2u)/3u;
+    bb_v93_row(fb+src_y*320u);
     bb_v31_expand_row(fb+src_y*320u,pal,dst);
 }
 #else
@@ -380,8 +419,10 @@ static void bb_v27_convert(unsigned top, uint16_t *dst) {
     for (unsigned y=0u;y<BB_V27_TILE_H;y+=3u) {
         const unsigned src_y=first_src+(y/3u)*2u;
         uint16_t *out=dst+y*BB_V27_W;
+        bb_v93_row(fb+src_y*320u);
         bb_v31_expand_row(fb+src_y*320u,pal,out);
         memcpy(out+BB_V27_W,out,BB_V27_W*sizeof(*out));
+        bb_v93_row(fb+(src_y+1u)*320u);
         bb_v31_expand_row(fb+(src_y+1u)*320u,pal,out+2u*BB_V27_W);
     }
 }
@@ -418,6 +459,7 @@ static void bb_v27_presenter(void) {
         uint32_t convert_total=0u, dma_total=0u;
         unsigned current=0u;
         const unsigned field_parity=bb_v32_field_parity;
+        bb_v93_hash=2166136261u;
         uint32_t t=time_us_32();
         bb_v27_convert(BB_V32_DEST_Y(0u,field_parity),bb_v27_tiles[current]);
         convert_total+=(uint32_t)(time_us_32()-t);
@@ -456,6 +498,10 @@ static void bb_v27_presenter(void) {
         if(frame_us>max)__atomic_store_n(&bb_v28_max_frame_us,frame_us,__ATOMIC_RELAXED);
         __atomic_store_n(&bb_v29_stage,4u,__ATOMIC_RELAXED);
         __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
+        if (bb_v93_hash != bb_v93_last[field_parity&1u]) {      /* BB_V93_GAME_FPS */
+            bb_v93_last[field_parity&1u]=bb_v93_hash;
+            __atomic_add_fetch(&bb_v93_changed[field_parity&1u],1u,__ATOMIC_RELAXED);
+        }
         __atomic_add_fetch(&bb_v27_frames,1u,__ATOMIC_RELAXED);
 #if BB_LCD_LACE
         bb_v32_field_parity^=1u;
@@ -541,6 +587,19 @@ void bb_lcd_vga_tick(void) {
                    (unsigned long)clock_get_hz(clk_peri),
                    (unsigned long)spi_get_baudrate(lcd.spi),
                    (unsigned long)lcd.dma_active);
+                {   const uint32_t c0=__atomic_load_n(&bb_v93_changed[0],__ATOMIC_RELAXED);   /* BB_V93_GAME_FPS */
+                    const uint32_t c1=__atomic_load_n(&bb_v93_changed[1],__ATOMIC_RELAXED);
+                    const uint32_t d0=c0-bb_v93_report_changed[0], d1=c1-bb_v93_report_changed[1];
+#if BB_LCD_LACE
+                    const uint32_t div=2u;
+#else
+                    const uint32_t div=1u;
+#endif
+                    printf("[bb-v93-game] fps_x10=%lu changed-fields=%lu/%lu (game frames/s: new guest screens; exact below %lu/s)\n",
+                           (unsigned long)(((d0>d1?d0:d1)*10000u)/delta_ms),
+                           (unsigned long)d0,(unsigned long)d1,
+                           (unsigned long)(((f-bb_v28_report_frames)*1000u)/delta_ms/div));
+                    bb_v93_report_changed[0]=c0; bb_v93_report_changed[1]=c1; }
                 bb_v28_report_ms=ms; bb_v28_report_frames=f;
                 bb_v28_report_strips=st; bb_v28_report_convert=cv;
                 bb_v28_report_dma=dm; bb_v28_report_frame=ft;

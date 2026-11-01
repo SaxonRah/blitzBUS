@@ -346,12 +346,38 @@ static void bb_set_vreg_for_clock(uint32_t khz)
     bb_vreg_mv_set = mv;
 }
 
+/* BB_CLK400_V1: above 300 MHz, slow the flash interface (QMI window 0)
+ * BEFORE raising clk_sys so the flash never runs above ~133 MHz: divider
+ * ceil(f/133 MHz), read delay divider-1, min deselect >= 7 (the values used
+ * in Michael Bell's RP2350 overclocking tests). Runs from SRAM with IRQs off.
+ * At 300 MHz and below nothing is touched. */
+#include "hardware/structs/qmi.h"
+#include "hardware/sync.h"
+static __attribute__((noinline)) void __not_in_flash_func(bb_flash_timing_for_clock)(uint32_t khz)
+{
+    uint32_t t, need, irq;
+    if (khz <= 300000u) return;
+    t = qmi_hw->m[0].timing;
+    need = (khz + 132999u) / 133000u;
+    if (need <= (t & 0xFFu)) return;
+    irq = save_and_disable_interrupts();
+    t = (t & ~0xFFu) | need;
+    t = (t & ~(7u << 8)) | ((need - 1u < 7u ? need - 1u : 7u) << 8);
+    if (((t >> 12) & 31u) < 7u) t = (t & ~(31u << 12)) | (7u << 12);
+    qmi_hw->m[0].timing = t;
+    restore_interrupts(irq);
+}
+
 static bool md_pico_set_clock(void)
 {
 #if MICRODOS_PICO_SYS_KHZ > 0
     bb_set_vreg_for_clock(MICRODOS_PICO_SYS_KHZ);
+    bb_flash_timing_for_clock(MICRODOS_PICO_SYS_KHZ);
     if (!set_sys_clock_khz(MICRODOS_PICO_SYS_KHZ, false)) return false;
-    if (psram_configure_params(PICO_DEFAULT_PSRAM_MAX_FREQ, PICO_DEFAULT_PSRAM_MAX_SELECT,
+#ifndef BB_PSRAM_MAX_HZ
+#define BB_PSRAM_MAX_HZ PICO_DEFAULT_PSRAM_MAX_FREQ
+#endif
+    if (psram_configure_params(BB_PSRAM_MAX_HZ, PICO_DEFAULT_PSRAM_MAX_SELECT,
                                PICO_DEFAULT_PSRAM_MIN_DESELECT) != 0) return false;
     return psram_reinitialize() == 0;
 #else

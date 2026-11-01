@@ -17,6 +17,11 @@ static volatile uint32_t bb49_enabled;
 static uint32_t bb49_previous;
 static uint32_t bb49_ignored;
 static uint32_t bb49_status;
+/* BB_V90_LR: the interrupted LR of every sample (for leaf functions such as
+ * memset/memcpy: the caller), in a 4 KB ring from the PSRAM meta pool. Printed
+ * as [bb-v90-lr] pc:lr pairs for C-code samples. Allocation failure = no LR. */
+void *bb_meta_calloc(size_t n, size_t size);
+static volatile uint32_t *bb49_lr;
 /* v49e: preserve the verified v49c exception-entry calling convention.
  * The AAPCS C helper uses the exception frame pointer passed in r0,
  * without any naked-handler prologue or arbitrary stack probing.
@@ -46,13 +51,13 @@ __attribute__((noinline,used)) static void bb49_capture_frame(
     /* Validation first: probe showed base[6]/base[7] contain consistent
        executable PCs and Thumb xPSR for EXC_RETURN=FFFFFFE9. */
     const uint32_t basepc=selected[6], basexpsr=selected[7];
-    uint32_t pc=0;
+    uint32_t pc=0, lr=0;
     if (bb49_valid_pair(basepc,basexpsr)) {
-        pc=basepc; bb49_candidate_base++;
+        pc=basepc; lr=selected[5]; bb49_candidate_base++;
         if (!(exc_return&0x10u)) bb49_base_even_fp++;
     } else if (!(exc_return&0x10u) &&
                bb49_valid_pair(selected[24],selected[25])) {
-        pc=selected[24]; bb49_candidate_fp++; bb49_fp_fallback++;
+        pc=selected[24]; lr=selected[23]; bb49_candidate_fp++; bb49_fp_fallback++;
     } else {
         bb49_rejected++; return;
     }
@@ -61,6 +66,7 @@ __attribute__((noinline,used)) static void bb49_capture_frame(
     else if (pc>=0x11000000u && pc<0x11800000u) ++bb49_total_psram;
     else ++bb49_total_other;
     bb49_pc[bb49_seq & (BB49_COUNT-1u)] = pc;
+    if (bb49_lr) bb49_lr[bb49_seq & (BB49_COUNT-1u)] = lr;   /* BB_V90_LR */
     bb49_seq++;
 }
 /* Identical pre-prologue exception entry proven in v49c. In particular,
@@ -92,6 +98,7 @@ static void bb49_init(uint32_t reload_ticks) {
     if ((old&~(uintptr_t)1u)>=0x20000000u && (old&~(uintptr_t)1u)<0x20080000u) {
         bb49_status=4;printf("[bb-v49-pc] DISABLED reason=systick-handler-in-sram\n");return;
     }
+    if (!bb49_lr) bb49_lr=(volatile uint32_t *)bb_meta_calloc(BB49_COUNT,sizeof(uint32_t));   /* BB_V90_LR */
     vt[15]=((uintptr_t)bb49_handler)|1u;
     __asm volatile("dsb sy\n isb sy" ::: "memory");
     bb49_enabled=1;
@@ -171,6 +178,20 @@ static void bb49_report(struct B86Jit *jit) {
         }
         if(n)puts(line);
         printf("[bb-v52-jit] samples=%lu\n",(unsigned long)njit);
+    }
+    /* BB_V90_LR: caller attribution for C-code samples (SRAM or flash) */
+    if (bb49_lr) {
+        uint32_t n=0; char line[8*18+32]; int len=0;
+        for(uint32_t i=first;i<stop;i++){
+            const uint32_t pc=bb49_pc[i&(BB49_COUNT-1u)]&~1u, lr=bb49_lr[i&(BB49_COUNT-1u)];
+            uint32_t k2, o2;
+            if(!((pc>=0x20000000u && pc<0x20082000u)||(pc>=0x10000000u && pc<0x11000000u))) continue;
+            if(b86_jit_pc_lookup(jit,(uintptr_t)pc,&k2,&o2)) continue;
+            if(!n) len=snprintf(line,sizeof line,"[bb-v90-lr]");
+            len+=snprintf(line+len,sizeof line-len," %08lX:%08lX",(unsigned long)pc,(unsigned long)lr);
+            if(++n==8){puts(line);n=0;}
+        }
+        if(n)puts(line);
     }
     bb49_previous=stop;
     __asm volatile("dmb sy" ::: "memory");

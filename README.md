@@ -58,15 +58,28 @@ no edit:
 $env:BB_PJ_HOT_KB = '128'; .\bb.bat boot
 ```
 
-`bb boot` and `bb build` print any window overrides before they start, and
-`bb config` lists every value with its source.
+`bb boot`, `bb dual` and `bb build` **stop** if the window has `BB_*` values
+that differ from `bb.config.psd1` (or are not in it), and list them. Clear them
+with `Get-ChildItem Env:BB_* | Remove-Item`, or pass `-AllowOverride` to build
+with them on purpose. `bb config` lists every value with its source.
+
+Every build runs install, CMake reconfigure, build and a check that the compiler
+flags contain exactly the definitions `scripts\install_live.py` wrote
+(`scripts\bb_verify_build.py`). All output goes to `logs\bb-build-<time>.txt`.
+`bb boot` and `bb dual` then flash that verified build.
+
+**C: drive safety.** `DOS622_HDD.IMG` is read and written straight to its sectors
+on the card (`BB622_SD_DIRECT`, on by default), never through FatFs, so a crash
+cannot damage the card's FAT or directory. The console shows
+`[bb622-hdd] direct sector I/O ON` at boot. If the image is too fragmented on the
+card, it says `OFF` and the old FatFs path is used.
 
 | Setting | Known-good | Meaning |
 |---|---|---|
 | `BB_MICRODOS`, `BB_BLITZ86`, `BB_PORT` | `C:\microDOS`, `C:\blitz86_v2`, `COM5` | checkouts and serial port |
 | `BB_SD_BOOT` | `1` | boot DOS 6.22 from the SD-card images |
-| `BB_SD_SPI_HZ` | `12500000` | SD card SPI clock after LCD init; exact rates 12500000, 15000000, 18750000, 25000000 (others are refused); the log's `[bb-sd-perf]` line reports time per sector |
-| `BB_SD_MULTI` | `64` | sectors per SD command for INT 13h reads of A: and C: (one seek + one multi-block read); 0 = one sector per command, as before |
+| `BB_SD_SPI_HZ` | `12500000` | SD card SPI clock after LCD init. Above 12.5 MHz is refused unless `BB_SD_FAST_OK=1`: 18.75 MHz crashed the Pico and corrupted the card's filesystem on 2026-10-31. Exact rates: 12500000, 15000000, 18750000, 25000000 |
+| `BB_SD_MULTI` | `64` | sectors per SD command for INT 13h reads and C: writes (one multi-block transfer per chunk); 0 = one sector per command, as before |
 | `BB_SYS_KHZ` | `300000` | system clock, 150000..400000 |
 | `BB_CPU` | `386` | `8086`, `186`, `286` or `386` |
 | `BB_386_NATIVE_T1` | `1` | native 386 tier 1 (needs `BB_CPU=386`) |

@@ -43,6 +43,48 @@ extern void b86_chain_audit_read(uint32_t out[10]);
 #include "pico/time.h"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
+/* BB_PSRAM_PROBE_V1: one-time boot report of the PSRAM (QMI window 1) timing
+ * and measured read latency. Reads only; runs from SRAM with IRQs off. */
+#if defined(PICO_RP2350) && !defined(__linux__)
+#include "hardware/structs/qmi.h"
+#include "hardware/sync.h"
+static __attribute__((noinline)) void __not_in_flash_func(bb_psram_probe)(void)
+{
+    const uint32_t t = qmi_hw->m[1].timing;
+    const uint32_t div = t & 0xFFu, sys = clock_get_hz(clk_sys);
+    volatile const uint32_t *const unc = (volatile const uint32_t *)0x15000000u;   /* XIP no-cache alias, CS1 */
+    volatile const uint32_t *const cac = (volatile const uint32_t *)0x11000000u;   /* cached PSRAM */
+    uint32_t sum = 0u, irq;
+    uint64_t t0, t1, t2, t3;
+    unsigned i;
+    printf("[bb-psram] timing=%08lX clkdiv=%lu rxdelay=%lu min-deselect=%lu max-select=%lu select-hold=%lu "
+           "select-setup=%lu pagebreak=%lu cooldown=%lu rfmt=%08lX rcmd=%08lX\n",
+           (unsigned long)t, (unsigned long)div, (unsigned long)((t >> 8) & 7u), (unsigned long)((t >> 12) & 31u),
+           (unsigned long)((t >> 17) & 63u), (unsigned long)((t >> 23) & 3u), (unsigned long)((t >> 25) & 1u),
+           (unsigned long)((t >> 28) & 3u), (unsigned long)((t >> 30) & 3u),
+           (unsigned long)qmi_hw->m[1].rfmt, (unsigned long)qmi_hw->m[1].rcmd);
+    printf("[bb-psram] clk_sys=%lu Hz -> PSRAM SCK=%lu Hz\n", (unsigned long)sys, (unsigned long)(div ? sys / div : 0u));
+    {   /* BB_CLK400_V1: flash (QMI window 0) timing, set before a clock above 300 MHz */
+        const uint32_t f = qmi_hw->m[0].timing, fdiv = f & 0xFFu;
+        printf("[bb-psram] flash timing=%08lX clkdiv=%lu rxdelay=%lu min-deselect=%lu -> flash SCK=%lu Hz\n",
+               (unsigned long)f, (unsigned long)fdiv, (unsigned long)((f >> 8) & 7u), (unsigned long)((f >> 12) & 31u),
+               (unsigned long)(fdiv ? sys / fdiv : 0u));
+    }
+    irq = save_and_disable_interrupts();
+    t0 = time_us_64();
+    for (i = 0u; i < 16384u; ++i) sum += unc[(i * 1031u) & 0x1FFFFFu];              /* every read goes to PSRAM */
+    t1 = time_us_64();
+    for (i = 0u; i < 16384u; ++i) sum += cac[(i * 1024u + (i & 7u)) & 0x1FFFFFu];    /* 4 KiB stride: cache misses */
+    t2 = time_us_64();
+    for (i = 0u; i < 16384u; ++i) sum += cac[i & 63u];                                /* 256 bytes: cache hits */
+    t3 = time_us_64();
+    restore_interrupts(irq);
+    printf("[bb-psram] per read: uncached %lu ns, cached miss %lu ns, cached hit %lu ns (16384 reads each, sum %08lX)\n",
+           (unsigned long)((t1 - t0) * 1000u / 16384u), (unsigned long)((t2 - t1) * 1000u / 16384u),
+           (unsigned long)((t3 - t2) * 1000u / 16384u), (unsigned long)sum);
+    fflush(stdout);
+}
+#endif
 #define BB_HAVE_TIMER 1
 #endif
 
@@ -1980,7 +2022,13 @@ static int start(MdRuntime *rt)
         static uint8_t bb_pj_code[BB_PJ_CODE_KB * 1024u] __attribute__((aligned(64)));
         const char *bb_pj_where = "SRAM";
 #endif
-        static uint64_t bb_pj_state[8192u / 8u];       /* SRAM: hash tables are probed on every block */
+#if defined(PICO_RP2350) && !defined(__linux__)
+        bb_psram_probe();                               /* BB_PSRAM_PROBE_V1: once, before the translator starts */
+#endif
+#ifndef BB_PJ_STATE_BYTES
+#define BB_PJ_STATE_BYTES 8192u                   /* BB_PJ_HASH_V1: set by install_live.py */
+#endif
+        static uint64_t bb_pj_state[(BB_PJ_STATE_BYTES + 7u) / 8u];   /* SRAM: hash tables are probed on every block */
         if (b86_pj_attach(&C, bb_pj_state, sizeof bb_pj_state, bb_pj_code, sizeof bb_pj_code))
             printf("[bb386-pj] native PM translator: %u KiB code in %s at %p, state %u B\n",
                    (unsigned)BB_PJ_CODE_KB, bb_pj_where, (void *)bb_pj_code, (unsigned)b86_pj_state_bytes());

@@ -23,6 +23,91 @@ static uint32_t bb622_hd_unsynced;
 
 bool bb_sd_hdd_available(void) { return bb622_hd_open; }
 
+/* BB_SD_DIRECT_V1: C: image sectors go straight to the card (disk_read /
+ * disk_write) through an extent table built from the FatFs fast-seek link map.
+ * The image never changes size, so FatFs never has to write the card's FAT or
+ * directory during a run: a crash can no longer unlink DOS622_HDD.IMG (the old
+ * path rewrote its directory entry on every f_sync, every 64 writes). Every
+ * write is synced (open multi-block write closed, card status checked) before
+ * INT 13h returns. If the map does not cover the whole image, the FatFs path
+ * below is used unchanged. BB622_SD_DIRECT=0 = the original behaviour. */
+#ifndef BB622_SD_DIRECT
+#define BB622_SD_DIRECT 1
+#endif
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+#define BB622_HD_EXTENTS 32u
+typedef struct { uint32_t first, count; LBA_t lba; } bb622_extent_t;
+static bb622_extent_t bb622_hd_ext[BB622_HD_EXTENTS];
+static unsigned bb622_hd_next;
+static BYTE bb622_hd_pdrv;
+static bool bb622_hd_direct;
+static bool bb622_hd_map_build(void)
+{
+    const FATFS *fs = bb622_hd_fil.obj.fs;
+    uint32_t file_sec = 0u, k;
+    unsigned n = 0u;
+    bb622_hd_next = 0u;
+    if (!fs || !bb622_hd_fil.cltbl || fs->csize == 0u) return false;
+    for (k = 1u; k + 1u < sizeof bb622_hd_clmt / sizeof bb622_hd_clmt[0] && bb622_hd_clmt[k] != 0u; k += 2u) {
+        const uint32_t ncl = (uint32_t)bb622_hd_clmt[k], scl = (uint32_t)bb622_hd_clmt[k + 1u];
+        if (n >= BB622_HD_EXTENTS || scl < 2u) return false;
+        bb622_hd_ext[n].first = file_sec;
+        bb622_hd_ext[n].count = ncl * (uint32_t)fs->csize;
+        bb622_hd_ext[n].lba = fs->database + (LBA_t)(scl - 2u) * fs->csize;
+        file_sec += bb622_hd_ext[n].count;
+        ++n;
+        if (file_sec >= BB622_HD_SECTORS) break;
+    }
+    if (file_sec < BB622_HD_SECTORS) return false;
+    bb622_hd_pdrv = fs->pdrv;
+    bb622_hd_next = n;
+    return true;
+}
+/* write=0: read, 1: write; `count` image sectors from image sector s */
+static bool bb622_hd_direct_rw(int write, uint32_t s, uint8_t *buf, uint32_t count)
+{
+    unsigned e = 0u;
+    bb622_retime_spi1();
+    while (count) {
+        uint32_t n;
+        LBA_t lba;
+        DRESULT r;
+        while (e < bb622_hd_next && s >= bb622_hd_ext[e].first + bb622_hd_ext[e].count) ++e;
+        if (e >= bb622_hd_next || s < bb622_hd_ext[e].first) return false;
+        n = bb622_hd_ext[e].first + bb622_hd_ext[e].count - s;
+        if (n > count) n = count;
+        lba = bb622_hd_ext[e].lba + (LBA_t)(s - bb622_hd_ext[e].first);
+        r = write ? disk_write(bb622_hd_pdrv, buf, lba, (UINT)n) : disk_read(bb622_hd_pdrv, buf, lba, (UINT)n);
+        if (r != RES_OK) {
+            if (write) (void)disk_ioctl(bb622_hd_pdrv, CTRL_SYNC, 0);
+            return false;
+        }
+        s += n; buf += n * 512u; count -= n;
+    }
+    if (write && disk_ioctl(bb622_hd_pdrv, CTRL_SYNC, 0) != RES_OK) return false;
+    return true;
+}
+/* same checks and first-8 messages as the FatFs path */
+static bool bb622_hd_direct_io(int write, uint32_t lba, uint8_t *buf, uint32_t count)
+{
+    bool ok;
+    if (!bb622_hd_open || !buf || count == 0u || lba >= BB622_HD_SECTORS || count > BB622_HD_SECTORS - lba) return false;
+    ok = bb622_hd_direct_rw(write, lba, buf, count);
+    if (!ok) {
+        if (++bb622_hd_error_n <= 8u)
+            printf("[bb622-hdd] DIRECT %s FAIL lba=%lu count=%lu\n", write ? "WRITE" : "READ",
+                   (unsigned long)lba, (unsigned long)count);
+        return false;
+    }
+    if (write) { if (++bb622_hd_write_n <= 8u) printf("[bb622-hdd] write LBA=%lu OK (direct)\n", (unsigned long)lba); }
+    else { if (++bb622_hd_read_n <= 8u) printf("[bb622-hdd] read LBA=%lu OK (direct)\n", (unsigned long)lba); }
+    return true;
+}
+#define BB622_HD_DIRECT_ON() (bb622_hd_direct)
+#else
+#define BB622_HD_DIRECT_ON() (0)
+#endif
+
 static void bb622_hd_mount(const char *drive)
 {
     char path[96];
@@ -68,6 +153,14 @@ static void bb622_hd_mount(const char *drive)
     printf("[bb622-hdd] fast seek not compiled (FF_USE_FASTSEEK=0)\n");
 #endif
     bb622_hd_unsynced=0;
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+    bb622_hd_direct = bb622_hd_fil.cltbl && bb622_hd_map_build();
+    if (bb622_hd_direct)
+        printf("[bb622-hdd] direct sector I/O ON: %u extent(s), card LBA %lu.. (card FAT/directory not written during the run)\n",
+               bb622_hd_next, (unsigned long)bb622_hd_ext[0].lba);
+    else
+        printf("[bb622-hdd] direct sector I/O OFF (link map does not cover the image): FatFs path\n");
+#endif
     bb622_hd_open=true;
     printf("[bb622-hdd] BIOS 80h mounted RW 256x16x63, %lu sectors, partition LBA 63, FAT16\n",(unsigned long)BB622_HD_SECTORS);
 }
@@ -179,7 +272,12 @@ bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 {
     const uint32_t t0 = time_us_32();
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+    const bool ok = BB622_HD_DIRECT_ON() ? (size == 512u && bb622_hd_direct_io(0, lba, buf, 1u))
+                                         : bb_sd_hdd_read_sector_raw(lba,buf,size);
+#else
     const bool ok = bb_sd_hdd_read_sector_raw(lba,buf,size);
+#endif
     bb_sdp_note(0, t0, ok);
     return ok;
 }
@@ -197,6 +295,13 @@ bool bb_sd_hdd_read_sectors(uint32_t lba,uint8_t *buf,uint32_t count)
     FRESULT fr;
     bool ok;
     if(!bb622_hd_open||!buf||count==0u||count>128u||lba>=BB622_HD_SECTORS||count>BB622_HD_SECTORS-lba)return false;
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+    if (BB622_HD_DIRECT_ON()) {                       /* BB_SD_DIRECT_V1 */
+        ok = bb622_hd_direct_io(0, lba, buf, count);
+        bb_sdp_note_n(0, t0, ok, ok ? count : 1u);
+        return ok;
+    }
+#endif
     bb_life_v2_enter(1u, lba);
     bb622_retime_spi1();
     fr=f_lseek(&bb622_hd_fil,(FSIZE_t)lba*512u);
@@ -241,9 +346,32 @@ bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
 bool bb_sd_hdd_write_sector(uint32_t lba,const uint8_t *buf,size_t size)
 {
     const uint32_t t0 = time_us_32();
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+    const bool ok = BB622_HD_DIRECT_ON() ? (size == 512u && bb622_hd_direct_io(1, lba, (uint8_t *)buf, 1u))
+                                         : bb_sd_hdd_write_sector_raw(lba,buf,size);
+#else
     const bool ok = bb_sd_hdd_write_sector_raw(lba,buf,size);
+#endif
     bb_sdp_note(1, t0, ok);
     return ok;
+}
+
+/* BB_SD_MULTIW_V1: `count` consecutive C: sectors in one multi-block write
+ * (direct path only; returns false otherwise, and the BIOS then writes the
+ * chunk one sector at a time exactly as before). */
+bool bb_sd_hdd_write_sectors(uint32_t lba,const uint8_t *buf,uint32_t count)
+{
+#if BB622_SD_DIRECT && FF_USE_FASTSEEK
+    const uint32_t t0 = time_us_32();
+    bool ok;
+    if (!BB622_HD_DIRECT_ON() || count == 0u || count > 128u) return false;
+    ok = bb622_hd_direct_io(1, lba, (uint8_t *)buf, count);
+    bb_sdp_note_n(1, t0, ok, ok ? count : 1u);
+    return ok;
+#else
+    (void)lba; (void)buf; (void)count;
+    return false;
+#endif
 }
 
 /* BB_DOS622_PERF_V1: flush pending HDD writes (call when idle / on exit) */

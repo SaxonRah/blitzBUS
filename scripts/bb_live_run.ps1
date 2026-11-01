@@ -37,6 +37,10 @@ $bbDesStage=0
 $bbDesDrive='B'
 $bbDesDigit=''
 $inputWarning=$false
+# BB_MARK_V1: Ctrl+F12 writes a host timestamp marker into the console log
+# (never sent to the guest). Used to time Descent's DEMO PLAYBACK (n% DONE).
+$bbMarkN=0
+$bbMarkWatch=[System.Diagnostics.Stopwatch]::StartNew()
 try {
     $installer=Join-Path $PSScriptRoot 'install_live.py'
     if(!(Test-Path -LiteralPath $installer)){throw "Missing installer: $installer"}
@@ -79,7 +83,7 @@ try {
     $serial.Open()
     $state.cdc='PASS'
     Write-Host '=== Interactive blitzBUS DOS console ==='
-    Write-Host 'Type DOS commands. Ctrl+] requests counters; Ctrl+X exits. -AutoTests runs DOS2TEST and MDSTRESS automatically.'
+    Write-Host 'Type DOS commands. Ctrl+X exits. Ctrl+F12 writes a timing marker [bb-mark] into the log. -AutoTests runs DOS2TEST and MDSTRESS automatically.'
     $text='';$dateSent=$false;$timeSent=$false;$testSent=$false;$stressSent=$false;$statsSent=$false
     $all='';$phase=0;$phaseState='';$doneTarget=0;$deltaTarget=0;$phaseDoneAt=$null;$phases=@()
     $statsSentAt=$null
@@ -212,6 +216,13 @@ try {
                     }
                     $ch=$k.KeyChar
                     if([int][char]$ch -eq 24){$quit=$true;break}
+                    if($k.Key -eq [ConsoleKey]::F12 -and (($k.Modifiers -band [ConsoleModifiers]::Control) -ne 0)){
+                        $bbMarkN++                                   # BB_MARK_V1
+                        $bbMarkLine="[bb-mark] n=$bbMarkN host-ms=$([long]$bbMarkWatch.Elapsed.TotalMilliseconds) at=$((Get-Date).ToString('HH:mm:ss.fff'))"
+                        [System.IO.File]::AppendAllText($log,"`n$bbMarkLine`n")
+                        Write-Host "`n$bbMarkLine"
+                        continue
+                    }
                     $bb622SpecialKey = switch ([string]$k.Key) {
                         'F1' {'OP'} 'F2' {'OQ'} 'F3' {'OR'} 'F4' {'OS'}
                         'F5' {'[15~'} 'F6' {'[17~'} 'F7' {'[18~'} 'F8' {'[19~'}
