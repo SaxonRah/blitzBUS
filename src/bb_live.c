@@ -237,6 +237,39 @@ static int last_rc = -1;
 #if BB_HAVE_TIMER
 static struct repeating_timer slice_timer;
 static bool slice_cb(struct repeating_timer *t) { (void)t; C.irq |= 1u; return true; }
+/* blitzBUS SLICE_SRAM_V1: the 1 kHz time slice from a hardware alarm whose
+ * interrupt handler runs from SRAM. The SDK repeating timer ran
+ * alarm_pool_irq_handler and slice_cb from FLASH 1,000 times a second,
+ * through the 16 KB XIP cache shared with PSRAM code and guest data; depending
+ * on where a build placed that code it cost ~1% to ~20% of core 0 (fetch
+ * stalls). Same semantics: core 0 interrupt, C.irq |= 1 every BB_SLICE_US.
+ * Falls back to the repeating timer if no hardware alarm is free. */
+#ifndef BB_SLICE_SRAM
+#define BB_SLICE_SRAM 1
+#endif
+#if BB_SLICE_SRAM
+#include "hardware/timer.h"
+#include "hardware/irq.h"
+static unsigned bb_slice_alarm;                                   /* set by bb_slice_start before the IRQ is enabled */
+static void __not_in_flash_func(bb_slice_irq)(void)
+{
+    const unsigned a = bb_slice_alarm;
+    timer_hw->intr = 1u << a;                                         /* acknowledge */
+    timer_hw->alarm[a] = timer_hw->timerawl + (uint32_t)BB_SLICE_US;  /* next slice, from now */
+    C.irq |= 1u;
+}
+static bool bb_slice_start(void)
+{
+    const int a = hardware_alarm_claim_unused(false);
+    if (a < 0) return false;
+    bb_slice_alarm = (unsigned)a;
+    irq_set_exclusive_handler(hardware_alarm_get_irq_num((uint)a), bb_slice_irq);
+    hw_set_bits(&timer_hw->inte, 1u << (unsigned)a);
+    timer_hw->alarm[a] = timer_hw->timerawl + (uint32_t)BB_SLICE_US;
+    irq_set_enabled(hardware_alarm_get_irq_num((uint)a), true);
+    return true;
+}
+#endif
 #endif
 
 B86_HOT static void to_b86(void)
@@ -2119,6 +2152,9 @@ static int start(MdRuntime *rt)
     memcpy(gen_seen, rt->code_page_generation, sizeof gen_seen);
 #endif
 #if BB_HAVE_TIMER
+#if BB_SLICE_SRAM
+    if (!bb_slice_start())                                   /* SLICE_SRAM_V1 */
+#endif
     add_repeating_timer_us(-(int64_t)BB_SLICE_US, slice_cb, NULL, &slice_timer);
 #endif
     return 1;
