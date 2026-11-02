@@ -1,0 +1,2 @@
+Vendored from MicroWave (github.com/SaxonRah/microwave) commit 53c6019 (2026-10-28), shared/src/.
+Unmodified. Used by bb_lcd_console.c (BB_MUSIC) for the MPU-401 -> FM synth on core 1.

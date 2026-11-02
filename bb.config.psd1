@@ -28,7 +28,7 @@
     BB_GUEST_KB      = '4096'             # guest RAM
     BB_CODE_KB       = '128'              # real-mode JIT code cache
     BB_BBUF          = '0'                # block buffer in SRAM (0 = off)
-    BB_PM_IRQ0       = '0'                # keep 0: continuous protected-mode IRQ0 delivery is unsafe
+    BB_PM_IRQ0       = '1'                # 1 for sound support
     BB_PM_KBD        = '1'                # protected-mode keyboard IRQ
     BB_PM_RAM        = '1'                # protected-mode hot paths in SRAM
 

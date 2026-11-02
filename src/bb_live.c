@@ -1890,6 +1890,7 @@ static int bb386_kbd_port_in(uint16_t port, uint8_t *v)
 uint32_t bb_snd_pcm_read(uint8_t *dst, uint32_t n) { (void)dst; (void)n; return 0u; }   /* BB_AUDIO_V1 stubs */
 uint32_t bb_snd_pcm_avail(void) { return 0u; }
 uint32_t bb_snd_pcm_rate(void) { return 11025u; }
+uint32_t bb_snd_midi_read(uint8_t *dst, uint32_t n) { (void)dst; (void)n; return 0u; }
 #endif
 #if BB_SND
 /* BB_SND_V1 glue: guest physical memory (bounds-checked), IRQ into the
@@ -2070,7 +2071,12 @@ uint32_t bb_snd_pcm_avail(void)
     return __atomic_load_n(&bb_snd_ready, __ATOMIC_ACQUIRE) ? bb_snd_ring_used(&bb_snd.pcm) : 0u;
 }
 uint32_t bb_snd_pcm_rate(void) { return __atomic_load_n(&bb_snd.pcm_rate_hz, __ATOMIC_ACQUIRE); }
-void bb_audio_diag(unsigned long out[9]);          /* bb_lcd_console.c */
+/* BB_AUDIO_V4: core 1's music synth consumes the MPU-401 byte ring */
+uint32_t bb_snd_midi_read(uint8_t *dst, uint32_t n)
+{
+    return __atomic_load_n(&bb_snd_ready, __ATOMIC_ACQUIRE) ? bb_snd_ring_get(&bb_snd.midi, dst, n) : 0u;
+}
+void bb_audio_diag(unsigned long out[17]);         /* bb_lcd_console.c */
 static void bb_snd_live_init(void)
 {
     static uint8_t *pcm, *midi;
@@ -2338,6 +2344,13 @@ static int start(MdRuntime *rt)
 #endif
 #if defined(BB_V49_PC_PROFILE) && defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
     bb49_init(clock_get_hz(clk_sys)/BB49_SAMPLE_HZ);
+#ifdef BB49_COUNT
+    /* BB_GPC_V1: guest CS:EIP beside each host PC sample, rings from the PSRAM pool */
+    bb49_gcs = (uint32_t *)bb_meta_calloc(BB49_COUNT, sizeof(uint32_t));
+    bb49_geip = (uint32_t *)bb_meta_calloc(BB49_COUNT, sizeof(uint32_t));
+    bb49_cpu = &C;
+    printf("[bb-gpc] guest PC sampling %s\n", bb49_gcs && bb49_geip ? "on" : "OFF (no pool memory)");
+#endif
 #endif
 #if !(defined(PICO_ON_DEVICE) && PICO_ON_DEVICE)
     bb_shadow = aligned_alloc(64, (B86_MEM_BYTES + 63u) & ~63u);
@@ -2792,42 +2805,14 @@ static void bb_snd_pm_poll(void)
                bb_snd.pcm.dropped, (unsigned long)bb_snd.rate_hz, bb_snd.n_midi, (unsigned)bb_snd.speaker,
                bb_snd.n_spk_on, bb_snd.n_spk_off, bb_snd.n_resets, bb_snd.n_guest_loud,
                (unsigned)bb_snd.ch[BB_SND_SB_DMA].page, (unsigned)bb_snd.ch[BB_SND_SB_DMA].cur_addr);
-        {   /* BB_SND_V5 probe: what is in guest memory at the 8237 buffer, through every path? */
-            const BbDmaCh *dc = &bb_snd.ch[BB_SND_SB_DMA];
-            const uint32_t base = ((uint32_t)dc->page << 16) | dc->base_addr, len = (uint32_t)dc->base_count + 1u;
-            unsigned long loud_phys = 0, loud_lin = 0;
-            uint8_t first[16];
-            for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) {
-                const uint8_t v = *b86_host_phys(&C, base + i);
-                if (i < 16u) first[i] = v;
-                if (v < 126u || v > 130u) ++loud_phys;
-                const uint8_t *pl = b86_host(&C, base + i);
-                if (pl) { const uint8_t w = *pl; if (w < 126u || w > 130u) ++loud_lin; }
-            }
-            printf("[bb-snd-probe] dma-buffer=%05lX len=%lu nonsilent-phys=%lu nonsilent-linear=%lu pg=%u C.mem=%p rt.mem=%p first=",
-                   (unsigned long)base, (unsigned long)len, loud_phys, loud_lin, (unsigned)C.pg, (void *)C.mem, (void *)(R ? R->cpu.memory : NULL));
-            for (unsigned i = 0; i < 16u && i < len; ++i) printf("%02X", first[i]);
-            printf("\n");
-            /* BB_SND_V6 write probe: markers (7Fh, near-silence) written 10 s ago that are
-             * still there = bytes the game did NOT write. Then mark the buffer again. */
-            {   static uint32_t mark_base, mark_len;
-                unsigned long survived = 0;
-                if (mark_len && mark_base == base && mark_len == len)
-                    for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) if (*b86_host_phys(&C, base + i) == 0x7Fu) ++survived;
-                printf("[bb-snd-probe] write-probe: %lu of %lu marker bytes survived 10 s (%s); pm-irq0-delivered=%lu pit0-reload=%lu\n",
-                       survived, (unsigned long)(mark_len ? mark_len : len),
-                       !mark_len ? "first report: marking" : survived == mark_len ? "NOBODY wrote the buffer" : "the game writes the buffer",
-                       (unsigned long)bb386_pmirq_delivered, (unsigned long)bb_pit.c[0].reload_raw);
-                if (dc->mode && (((dc->mode >> 2) & 3u) == 2u) && len >= 16u) {
-                    for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) *b86_host_phys(&C, base + i) = 0x7Fu;
-                    mark_base = base; mark_len = len;
-                }
-            }
-        }
-        unsigned long au[9];
+        unsigned long au[17];
         bb_audio_diag(au);
         printf("[bb-audio] status=%lu (1=playing 2=no PIO 3=no DMA 4=no memory 0=not started) frames-out=%lu pcm-bytes-in=%lu dma-underruns=%lu starved=%lu in-rate=%lu ring-check=%lu (0=ok) peak-out=%lu nonsilent-in=%lu\n",
                au[0], au[1], au[2], au[3], au[4], au[5], au[6], au[7], au[8]);
+        printf("[bb-music] midi-bytes-in=%lu notes=%lu voices-stolen=%lu events-dropped=%lu peak=%lu bank=%s\n",
+               au[9], au[10], au[11], au[12], au[13], au[16] == 1u ? "GENMIDI" : au[16] ? "GENMIDI-rejected" : "fallback");
+        printf("[bb-audio-load] core-1 producer %lu us in the last report period (%lu.%lu%% of 10 s), longest call %lu us\n",
+               au[14], au[14] / 100000u, (au[14] / 10000u) % 10u, au[15]);
     }
     const uint8_t bit = (uint8_t)(1u << BB_SND_SB_IRQ);
     if (!(bb_irq36.irr & bit) || (bb_irq36.imr & bit) || (bb_irq36.isr & (uint8_t)((bit << 1) - 1u))) return;

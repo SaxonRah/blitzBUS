@@ -487,9 +487,9 @@ static void bb_v27_convert(unsigned top, uint16_t *dst) {
 #ifndef BB_AUDIO_VOLUME
 #define BB_AUDIO_VOLUME 192u             /* of 256 */
 #endif
-#define BB_AU_FRAMES 1024u               /* ring: 1024 frames x 4 bytes = 4 KiB */
-#define BB_AU_RING_BITS 12u
-#define BB_AU_LEAD 512u                  /* keep ~23 ms queued ahead of the DMA */
+#define BB_AU_FRAMES 2048u               /* BB_AUDIO_V5: ring 2048 frames x 4 bytes = 8 KiB (93 ms) */
+#define BB_AU_RING_BITS 13u
+#define BB_AU_LEAD 1024u                 /* keep ~46 ms queued ahead of the DMA */
 #define BB_AU_CHUNK 64u                  /* refill granularity */
 extern uint32_t bb_snd_pcm_read(uint8_t *dst, uint32_t n);
 extern uint32_t bb_snd_pcm_avail(void);
@@ -504,7 +504,8 @@ static uint32_t bb_au_in_n, bb_au_in_i;
 /* status, frames out, pcm bytes in, dma underruns, starved, rate,
  * ring check (0 = ok; uncached read-back mismatches + 1000 x cached read-back mismatches),
  * peak |output| since the last report, non-silent input bytes since the last report */
-static volatile unsigned long bb_au_n[9];
+static volatile unsigned long bb_au_n[17];   /* [16] BB_AUDIO_V6: GENMIDI bank: 0 none, 1 loaded, 10+error */   /* [9..13] BB_AUDIO_V4 music: midi bytes in, notes, stolen, dropped, peak;
+                                                [14] producer us, [15] longest producer call us (BB_AUDIO_V5) */
 static uint32_t *bb_au_ring_cached;              /* BB_AUDIO_V2: same memory, cached alias (self-check only) */
 static uint32_t bb_au_tone_left, bb_au_tone_phase;   /* BB_AUDIO_V2: start-up test tone */
 
@@ -531,6 +532,91 @@ static int bb_au_byte(uint8_t *b)
     if (*b < 126u || *b > 130u) ++bb_au_n[8];     /* BB_AUDIO_V2 level meter */
     return 1;
 }
+/* BB_AUDIO_V4: General MIDI music - MicroWave's MIDI parser and two-operator FM
+ * synth (src/mw/, vendored from microwave 53c6019) fed from the guest's MPU-401
+ * queue. Sized like an OPL2: 9 voices; 24 queued events (SRAM). The per-sample state
+ * (synth, 32-frame block buffers) is in SRAM; the parser and mixer struct,
+ * touched per MIDI byte / per block, come from the PSRAM pool (bb_au_prepare). */
+#ifndef BB_MUSIC
+#define BB_MUSIC 1
+#endif
+#if BB_MUSIC
+#define SND_MIDI_FM_MAX_VOICES 9
+#define SND_MIDI_FM_QUEUE_EVENTS 24
+#include "mw/snd.c"
+#include "mw/snd_synth.c"
+#include "mw/snd_midi.c"
+#include "mw/snd_midi_fm.c"
+/* BB_AUDIO_V6: Doom's GENMIDI instrument bank (175 OPL2 patches), extracted from the
+ * user's own WAD by install_music3.py into bb_genmidi_bank.h (not distributed; listed
+ * in .gitignore). Without that header the synth keeps MicroWave's fallback patches. */
+#include "mw/snd_genmidi.c"
+#if defined(__has_include)
+#if __has_include("bb_genmidi_bank.h")
+#include "bb_genmidi_bank.h"
+#endif
+#endif
+#ifndef BB_GENMIDI_PRESENT
+#define BB_GENMIDI_PRESENT 0
+#endif
+static snd_genmidi_bank_t *bb_gm_bank;
+#ifndef BB_MUSIC_HALF_RATE
+#define BB_MUSIC_HALF_RATE 1                     /* BB_AUDIO_V5: synth at BB_AUDIO_RATE/2, interpolated */
+#endif
+#ifndef BB_MUSIC_VOLUME
+#define BB_MUSIC_VOLUME 256u                     /* of 256, applied to the synth output */
+#endif
+#define BB_FM_FRAMES 32
+extern uint32_t bb_snd_midi_read(uint8_t *dst, uint32_t n);
+static snd_midi_fm_t bb_fm;
+static snd_sample_t bb_fm_block[BB_FM_FRAMES];
+static int16_t bb_fm_out[BB_FM_FRAMES];
+static uint32_t bb_fm_out_n, bb_fm_out_i;
+static snd_midi_t *bb_midi;
+static snd_mixer_t *bb_mix;
+static uint8_t bb_fm_ready, bb_midi_buf[16], bb_midi_n, bb_midi_i;
+static void bb_fm_drain(snd_mixer_t *m, long frame, int frames, const snd_sample_t *samples, void *user)
+{
+    (void)m; (void)frame; (void)user;
+    for (int i = 0; i < frames && i < BB_FM_FRAMES; ++i) bb_fm_out[i] = samples ? samples[i] : 0;
+    bb_fm_out_n = (uint32_t)(frames < BB_FM_FRAMES ? frames : BB_FM_FRAMES); bb_fm_out_i = 0;
+}
+static void bb_fm_scene(snd_mixer_t *m, void *user) { snd_midi_fm_mix_block((snd_midi_fm_t *)user, m); }
+/* next music sample: feed queued MIDI bytes (never more than the event queue
+ * can take - the rest waits in the MPU-401 ring), render 32 frames at a time */
+static int32_t bb_fm_next_raw(void)
+{
+    if (!bb_fm_ready) return 0;
+    if (bb_fm_out_i == bb_fm_out_n) {
+        while (snd_midi_fm_pending_events(&bb_fm) < SND_MIDI_FM_QUEUE_EVENTS - 4) {
+            if (bb_midi_i == bb_midi_n) {
+                bb_midi_n = (uint8_t)bb_snd_midi_read(bb_midi_buf, sizeof bb_midi_buf); bb_midi_i = 0;
+                bb_au_n[9] += bb_midi_n;
+                if (!bb_midi_n) break;
+            }
+            snd_midi_feed_byte(bb_midi, bb_mix->block_frame, bb_midi_buf[bb_midi_i++]);
+        }
+        snd_render_blocked(bb_mix, BB_FM_FRAMES, bb_fm_scene, &bb_fm);
+        if (bb_fm_out_i == bb_fm_out_n) return 0;          /* nothing drained (defensive) */
+    }
+    const int32_t v = ((int32_t)bb_fm_out[bb_fm_out_i++] * (int32_t)BB_MUSIC_VOLUME) >> 8;
+    { const unsigned long m = (unsigned long)(v < 0 ? -v : v); if (m > bb_au_n[13]) bb_au_n[13] = m; }
+    return v;
+}
+/* BB_AUDIO_V5: at half rate every synth sample covers two output frames -
+ * the first is the midpoint to the previous sample (linear interpolation) */
+static int32_t bb_fm_next(void)
+{
+#if BB_MUSIC_HALF_RATE
+    static int32_t bb_fm_last, pending;
+    static uint8_t bb_fm_phase;
+    if (!bb_fm_phase) { pending = bb_fm_next_raw(); bb_fm_phase = 1u; return (bb_fm_last + pending) / 2; }
+    bb_fm_phase = 0u; bb_fm_last = pending; return pending;
+#else
+    return bb_fm_next_raw();
+#endif
+}
+#endif
 static int32_t bb_au_next_sample(void)
 {
     if (!bb_au_playing) {
@@ -548,9 +634,18 @@ static int32_t bb_au_next_sample(void)
     return (v * (int32_t)BB_AUDIO_VOLUME) >> 8;
 }
 /* producer (flash): fill the ring up to BB_AU_LEAD frames ahead of the DMA */
+static void bb_au_pump_body(void);
 static void __noinline bb_au_pump(void)
 {
     if (bb_au_dma < 0) return;
+    const uint32_t t0 = timer_hw->timerawl;           /* BB_AUDIO_V5: core-1 load meter */
+    bb_au_pump_body();
+    const uint32_t dt = timer_hw->timerawl - t0;
+    bb_au_n[14] += dt;
+    if (dt > bb_au_n[15]) bb_au_n[15] = dt;
+}
+static void bb_au_pump_body(void)
+{
     const uint32_t rate = bb_snd_pcm_rate();
     if (rate != bb_au_rate) { bb_au_rate = rate; bb_au_step = (uint32_t)(((uint64_t)rate << 16) / BB_AUDIO_RATE); bb_au_n[5] = rate; }
     uint32_t ahead = bb_au_ahead();
@@ -562,6 +657,11 @@ static void __noinline bb_au_pump(void)
     }
     for (uint32_t todo = ahead < BB_AU_LEAD ? BB_AU_LEAD - ahead : 0u; todo; --todo) {
         int32_t s = bb_au_next_sample();
+#if BB_MUSIC
+        s += bb_fm_next();                            /* BB_AUDIO_V4: music */
+        if (s > 32767) s = 32767;
+        if (s < -32768) s = -32768;
+#endif
         if (bb_au_tone_left) {                        /* BB_AUDIO_V2: 1 s, 880 Hz triangle at start-up */
             --bb_au_tone_left;
             bb_au_tone_phase += (uint32_t)(((uint64_t)880u << 32) / BB_AUDIO_RATE);
@@ -592,6 +692,17 @@ static void bb_au_cache_drop(uintptr_t cached_addr, uint32_t bytes, int clean_fi
  * through both aliases (otherwise the DMA would stream something else). */
 static void bb_au_prepare(void)
 {
+#if BB_MUSIC
+    bb_midi = (snd_midi_t *)bb_meta_calloc(1u, sizeof(snd_midi_t));      /* BB_AUDIO_V4: PSRAM pool */
+    bb_mix = (snd_mixer_t *)bb_meta_calloc(1u, sizeof(snd_mixer_t));
+#if BB_GENMIDI_PRESENT
+    {   /* BB_AUDIO_V6: convert the GENMIDI lump (flash) into a PSRAM bank, on core 0 */
+        snd_genmidi_bank_t *b = (snd_genmidi_bank_t *)bb_meta_calloc(1u, sizeof(snd_genmidi_bank_t));
+        const int e = b ? snd_genmidi_load(b, bb_genmidi_lump, (uint32_t)sizeof bb_genmidi_lump) : SND_GENMIDI_ERR_ARGUMENT;
+        if (e == SND_GENMIDI_OK) { bb_gm_bank = b; bb_au_n[16] = 1u; } else bb_au_n[16] = 10u + (unsigned long)e;
+    }
+#endif
+#endif
     uint8_t *raw = (uint8_t *)bb_meta_calloc(2u * BB_AU_FRAMES * 4u, 1u);
     if (!raw) { bb_au_n[0] = 4u; return; }
     uintptr_t a = ((uintptr_t)raw + (BB_AU_FRAMES * 4u - 1u)) & ~(uintptr_t)(BB_AU_FRAMES * 4u - 1u);
@@ -641,20 +752,35 @@ static void bb_au_start(void)
                           dma_encode_endless_transfer_count(), true);
     bb_au_w = BB_AU_LEAD;                             /* start with half a ring of silence */
     bb_au_tone_left = BB_AUDIO_RATE;                  /* BB_AUDIO_V2: then a 1 s test tone */
+#if BB_MUSIC
+    if (bb_midi && bb_mix) {                          /* BB_AUDIO_V4: MIDI -> FM synth */
+        snd_init(bb_mix, (int)(BB_MUSIC_HALF_RATE ? BB_AUDIO_RATE / 2u : BB_AUDIO_RATE), 1, bb_fm_block, BB_FM_FRAMES, bb_fm_drain, NULL);
+        snd_midi_init(bb_midi);
+        snd_midi_fm_init(&bb_fm);
+        snd_midi_fm_bind(&bb_fm, bb_midi);
+        snd_midi_fm_set_voice_limit(&bb_fm, SND_MIDI_FM_MAX_VOICES);
+        if (bb_gm_bank) snd_midi_fm_set_bank(&bb_fm, snd_genmidi_midi_fm_bank(bb_gm_bank));   /* BB_AUDIO_V6 */
+        bb_fm_ready = 1u;
+    }
+#endif
     bb_au_dma = ch;
     pio_sm_set_enabled(pio, BB_AUDIO_SM, true);
     bb_au_n[0] = 1u;
 }
 #define BB_AU_SERVICE() do { if (bb_au_need()) bb_au_pump(); } while (0)
 /* for core 0's report line */
-void bb_audio_diag(unsigned long out[9])
+void bb_audio_diag(unsigned long out[17])
 {
-    for (unsigned i = 0; i < 9u; ++i) out[i] = bb_au_n[i];
-    bb_au_n[7] = 0; bb_au_n[8] = 0;                   /* level meters restart each report */
+#if BB_MUSIC
+    bb_au_n[10] = bb_fm.midi_notes_started; bb_au_n[11] = bb_fm.voices_stolen; bb_au_n[12] = bb_fm.dropped_events;
+#endif
+    for (unsigned i = 0; i < 17u; ++i) out[i] = bb_au_n[i];
+    bb_au_n[7] = 0; bb_au_n[8] = 0; bb_au_n[13] = 0;  /* level meters restart each report */
+    bb_au_n[14] = 0; bb_au_n[15] = 0;                 /* load meter too */
 }
 #else
 #define BB_AU_SERVICE() ((void)0)
-void bb_audio_diag(unsigned long out[9]) { for (unsigned i = 0; i < 9u; ++i) out[i] = 0u; }
+void bb_audio_diag(unsigned long out[17]) { for (unsigned i = 0; i < 17u; ++i) out[i] = 0u; }
 #endif
 #if BB_CORE1_SRAM_WAIT
 #include "hardware/dma.h"
@@ -777,6 +903,15 @@ void bb_audio_boot_tick(void)
     printf("[bb-audio] core 1 audio: ring %p (cached %p) self-check=%lu (0=ok), I2S BCLK GP%u LRCLK GP%u DATA GP%u at %u Hz, 1 s test tone\n",
            (void *)bb_au_ring, (void *)bb_au_ring_cached, bb_au_n[6], (unsigned)BB_AUDIO_PIN_BCLK,
            (unsigned)(BB_AUDIO_PIN_BCLK + 1u), (unsigned)BB_AUDIO_PIN_DATA, (unsigned)BB_AUDIO_RATE);
+#if BB_MUSIC
+    printf("[bb-music] instrument bank: %s\n",
+#if BB_GENMIDI_PRESENT
+           bb_au_n[16] == 1u ? "GENMIDI (" BB_GENMIDI_SOURCE ")" : "GENMIDI present but REJECTED - fallback patches"
+#else
+           "none - MicroWave fallback patches (install_music3.py extracts GENMIDI from your WAD)"
+#endif
+           );
+#endif
     fflush(stdout);
     bb_v27_started = 1u;
     multicore_launch_core1(bb_v27_presenter);       /* parked until VGA; keeps audio flowing */

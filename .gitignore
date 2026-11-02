@@ -49,3 +49,5 @@ __pycache__/
 /scripts/.bb_dual_v2_runner_*.ps1
 *.WAD
 *.TCF
+# generated from your own WAD (id Software data) - do not commit
+src/bb_genmidi_bank.h

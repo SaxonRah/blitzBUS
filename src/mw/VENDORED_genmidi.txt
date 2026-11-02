@@ -1,0 +1,2 @@
+Vendored from MicroWave (github.com/SaxonRah/microwave) commit 53c6019 (2026-10-28), shared/src/: snd_genmidi.c/.h.
+Unmodified. Converts a GENMIDI lump into FM instruments for the music synth.
