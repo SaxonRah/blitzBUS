@@ -19,6 +19,10 @@
 #include "bb_live.h"
 #include "bb_vga.h"
 #include "bb_vga.c"
+#include "bb_snd.c"   /* BB_SND_V1: Sound Blaster 2.0 + 8237 DMA + MPU-401 */
+#if BB_SND
+static void bb_snd_trace_kbc(int out, uint16_t port, uint8_t val);   /* BB_SND_V2 */
+#endif
 #include "bb_pit.h"
 #include "bb_irq.h"
 #include "bb_irq0_burst.h" /* BB622_IRQ0_BURST_DIAG_V1 */
@@ -1870,14 +1874,227 @@ static int bb386_kbd_port_in(uint16_t port, uint8_t *v)
     /* In real mode, the original DOS/BIOS input hook owns ports 60h/64h. */
     if (!(C.msw & 1u)) return 0;
     if (!BB386_PM_KBD || !bb386_kbd_pm_us) return 0;
-    if (port == 0x60u) { *v = bb386_k60; bb386_kobf = 0u; return 1; }
-    if (port == 0x64u) { *v = (uint8_t)(0x1Cu | bb386_kobf); return 1; }
+    if (port == 0x60u) { *v = bb386_k60; bb386_kobf = 0u;
+#if BB_SND
+        bb_snd_trace_kbc(0, port, *v);                    /* BB_SND_V2 */
+#endif
+        return 1; }
+    if (port == 0x64u) { *v = (uint8_t)(0x1Cu | bb386_kobf);
+#if BB_SND
+        bb_snd_trace_kbc(0, port, *v);                    /* BB_SND_V2 */
+#endif
+        return 1; }
     return 0;
 }
+#if !BB_SND
+uint32_t bb_snd_pcm_read(uint8_t *dst, uint32_t n) { (void)dst; (void)n; return 0u; }   /* BB_AUDIO_V1 stubs */
+uint32_t bb_snd_pcm_avail(void) { return 0u; }
+uint32_t bb_snd_pcm_rate(void) { return 11025u; }
+#endif
+#if BB_SND
+/* BB_SND_V1 glue: guest physical memory (bounds-checked), IRQ into the
+ * emulated PIC, rings from the PSRAM metadata pool. Core 1 consumes
+ * bb_snd.pcm / bb_snd.midi (audio output stage). */
+static BbSnd bb_snd;
+static uint8_t bb_snd_ready;
+/* BB_SND_V2 diagnostics: the first BB_SND_TRACE events (sound ports, IRQ 5,
+ * and - once sound activity has begun - 8042 / port 92h accesses) are printed
+ * as they happen, with the CPU location. 0 disables. */
+#ifndef BB_SND_TRACE
+#define BB_SND_TRACE 600u
+#endif
+static unsigned bb_snd_trace_n;
+static char bb_snd_where_path = 'N';
+static uint32_t bb_snd_where_cs, bb_snd_where_ip;
+static int bb_snd_trace_room(void) { return bb_snd_trace_n < BB_SND_TRACE; }
+static void bb_snd_where_native(B86Cpu *c) { bb_snd_where_path = 'N'; bb_snd_where_cs = (uint16_t)c->seg[B86_CS]; bb_snd_where_ip = c->ip; }
+static void bb_snd_where_interp(MdRuntime *rt) { bb_snd_where_path = 'I'; bb_snd_where_cs = rt->cpu.cs; bb_snd_where_ip = rt->cpu.ip; }
+static const char *bb_snd_mode(void) { return bb_snd_where_path == 'I' ? "RM" : ((C.msw & 1u) ? "PM" : "RM"); }
+/* BB_SND_V3: identical consecutive accesses are collapsed into one line with a count */
+static uint32_t bb_snd_rep_key, bb_snd_rep_ip; static unsigned long bb_snd_rep_n;
+static unsigned bb_snd_irq_traced;
+static void bb_snd_trace_flush(void)
+{
+    if (bb_snd_rep_n > 1u) printf("[bb-snd-trace]    (previous access repeated %lu times)\n", bb_snd_rep_n - 1u);
+    bb_snd_rep_n = 0;
+}
+static uint64_t bb_snd_trace_last_us;
+static void bb_snd_trace_port(void *u, int out, uint16_t port, uint8_t val)
+{
+    (void)u;
+    {   /* BB_SND_V4: a new program (DSP reset after 5 s of no SB activity) gets a fresh trace budget */
+        const uint64_t now = bb_now_us();
+        if (out && port == BB_SND_SB_BASE + 6u && val == 1u && bb_snd_trace_last_us && now - bb_snd_trace_last_us > 5000000u) {
+            bb_snd_trace_flush();
+            printf("[bb-snd-trace] --- new program: trace budget restarted ---\n");
+            bb_snd_trace_n = 0; bb_snd_irq_traced = 0;
+        }
+        if (port >= BB_SND_SB_BASE && port <= BB_SND_SB_BASE + 15u) bb_snd_trace_last_us = now;
+    }
+    const uint32_t key = ((uint32_t)out << 24) | ((uint32_t)port << 8) | val;
+    if (bb_snd_rep_n && key == bb_snd_rep_key && bb_snd_where_ip == bb_snd_rep_ip) { ++bb_snd_rep_n; return; }
+    if (!bb_snd_trace_room()) return;
+    bb_snd_trace_flush();
+    bb_snd_rep_key = key; bb_snd_rep_ip = bb_snd_where_ip; bb_snd_rep_n = 1;
+    ++bb_snd_trace_n;
+    printf("[bb-snd-trace] #%u %s %03X %s %02X at %04lX:%08lX %s %c\n", bb_snd_trace_n, out ? "OUT" : "IN ",
+           (unsigned)port, out ? "<-" : "->", (unsigned)val, (unsigned long)bb_snd_where_cs,
+           (unsigned long)bb_snd_where_ip, bb_snd_mode(), bb_snd_where_path);
+}
+/* BB_KBC_V2: is the protected-mode keyboard emulation answering 60h/64h? */
+static int bb_kbc_pm_kbd_active(void) { return (C.msw & 1u) && BB386_PM_KBD && bb386_kbd_pm_us; }
+/* BB_KBC_V1: 8042 command responses (DOS extenders read the output port /
+ * command byte and wait for keyboard ACKs, e.g. when they exit; the emulated
+ * 8042 used to ignore every command, so they timed out: "DOS/16M error: [26]
+ * 8042 timeout"). Responses are returned through port 60h with OBF set, in both
+ * I/O chains; command writes still reach the existing handlers too. A20 is
+ * always on in this machine, the reset line inactive. BB_KBC_CMDS=0: old
+ * behaviour. Every 8042 command/data write and response read is traced (own
+ * budget). */
+#ifndef BB_KBC_CMDS
+#define BB_KBC_CMDS 1
+#endif
+static uint8_t bb_kbc_q[6], bb_kbc_qn, bb_kbc_expect, bb_kbc_cmdbyte = 0x45u, bb_kbc_outport = 0xDFu;
+static uint64_t bb_kbc_q_us;                         /* BB_KBC_V3: time of the newest queued response */
+static unsigned bb_kbc_traced;
+static void bb_kbc_trace(const char *what, uint16_t port, uint8_t v)
+{
+    if (bb_kbc_traced >= 300u) return;
+    ++bb_kbc_traced; bb_snd_trace_flush();
+    printf("[bb-kbc-trace] #%u %s %03X %02X at %04lX:%08lX %s %c q=%u\n", bb_kbc_traced, what, (unsigned)port,
+           (unsigned)v, (unsigned long)bb_snd_where_cs, (unsigned long)bb_snd_where_ip, bb_snd_mode(),
+           bb_snd_where_path, (unsigned)bb_kbc_qn);
+}
+static void bb_kbc_push(uint8_t v) { if (bb_kbc_qn < sizeof bb_kbc_q) bb_kbc_q[bb_kbc_qn++] = v; bb_kbc_q_us = bb_now_us(); }
+static void bb_kbc_out(uint16_t port, uint8_t v)
+{
+    if (port == 0x92u) { bb_kbc_trace("OUT", port, v); return; }
+    if (port != 0x60u && port != 0x64u) return;
+    bb_kbc_trace("OUT", port, v);
+#if BB_KBC_CMDS
+    if (port == 0x64u) {
+        bb_kbc_expect = 0;
+        switch (v) {
+        case 0x20u: bb_kbc_push(bb_kbc_cmdbyte); break;
+        case 0x60u: case 0xD1u: case 0xD2u: case 0xD3u: case 0xD4u: bb_kbc_expect = v; break;
+        case 0xAAu: bb_kbc_push(0x55u); break;
+        case 0xA9u: case 0xABu: case 0xE0u: bb_kbc_push(0x00u); break;
+        case 0xC0u: bb_kbc_push(0xBFu); break;
+        case 0xD0u: bb_kbc_push(bb_kbc_outport); break;
+        default: break;                              /* A7/A8/AD/AE/DD/DF/F0-FF: no response */
+        }
+        return;
+    }
+    switch (bb_kbc_expect) {                         /* port 60h */
+    case 0x60u: bb_kbc_cmdbyte = v; break;
+    case 0xD1u: bb_kbc_outport = (uint8_t)(v | 0x03u); break;   /* reset line stays inactive, A20 stays on */
+    case 0xD2u: bb_kbc_push(v); break;
+    case 0xD3u: case 0xD4u: break;
+    default:                                         /* a command to the keyboard itself */
+        if (v == 0xFFu) { bb_kbc_push(0xFAu); bb_kbc_push(0xAAu); }
+        else if (v == 0xF2u) { bb_kbc_push(0xFAu); bb_kbc_push(0xABu); bb_kbc_push(0x83u); }
+        else if (v == 0xEEu) bb_kbc_push(0xEEu);
+        else bb_kbc_push(0xFAu);
+        break;
+    }
+    bb_kbc_expect = 0;
+#endif
+}
+static unsigned bb_kbc_status_traced;
+static int bb_kbc_in(uint16_t port, uint8_t *v)
+{
+#if BB_KBC_CMDS
+    /* BB_KBC_V3: a response nobody read within 50 ms is dropped, so nothing queued
+     * in one context (e.g. DOS/4GW's start in real mode) can surface later in a
+     * game's keyboard interrupt handler. */
+    if (bb_kbc_qn && bb_now_us() - bb_kbc_q_us > 50000u) bb_kbc_qn = 0;
+    /* BB_KBC_V3: the 8042 has ONE output buffer - while the protected-mode keyboard
+     * emulation has signalled a scancode (OBF, IRQ 1), queued responses wait. */
+    if (bb_kbc_qn && bb_kbc_pm_kbd_active() && bb386_kobf) return 0;
+    if (!bb_kbc_qn) {
+        /* BB_KBC_V2: with no response queued, the status port used to read FFh
+         * whenever the protected-mode keyboard emulation was not answering (real
+         * mode, or PM before it starts): "input buffer full" forever, so DOS/16M's
+         * wait-until-empty loop timed out ("8042 timeout") without ever writing a
+         * command. Answer like the PM path does when idle: 1Ch (IBF=0, OBF=0). */
+        if (port == 0x64u && !bb_kbc_pm_kbd_active()) {
+            *v = 0x1Cu;
+            if (bb_kbc_status_traced < 24u) { ++bb_kbc_status_traced; bb_kbc_trace("IN ", port, *v); }
+            return 1;
+        }
+        return 0;
+    }
+    if (port == 0x64u) { *v = 0x1Du; return 1; }     /* 0x1C | OBF */
+    if (port == 0x60u) {
+        *v = bb_kbc_q[0];
+        memmove(bb_kbc_q, bb_kbc_q + 1, --bb_kbc_qn);
+        bb_kbc_trace("IN ", port, *v);
+        return 1;
+    }
+#else
+    (void)port; (void)v;
+#endif
+    return 0;
+}
+static void bb_snd_trace_kbc(int out, uint16_t port, uint8_t val)
+{
+    (void)out; (void)port; (void)val;                /* superseded by bb_kbc_trace (BB_SND_V3) */
+}
+static unsigned long bb_snd_pm_irqs, bb_snd_pm_blocked;
+static uint64_t bb_snd_report_us;
+static int bb_snd_read_phys(void *u, uint32_t phys, uint8_t *dst, uint32_t n)
+{
+    (void)u;
+    if (phys >= B86_RAM_BYTES || n > B86_RAM_BYTES - phys) return 0;
+    for (uint32_t i = 0; i < n; ++i) dst[i] = *b86_host_phys(&C, phys + i);
+    return 1;
+}
+static void bb_snd_raise_irq(void *u, unsigned irq)
+{
+    (void)u;
+    if (irq < 8u) bb_irq36.irr |= (uint8_t)(1u << irq);
+    if (bb_snd_trace_room() && bb_snd_irq_traced < 30u) {
+        ++bb_snd_irq_traced; bb_snd_trace_flush();
+        ++bb_snd_trace_n;
+        printf("[bb-snd-trace] #%u IRQ%u raised: irr=%02X imr=%02X isr=%02X base=%02X\n", bb_snd_trace_n, irq,
+               (unsigned)bb_irq36.irr, (unsigned)bb_irq36.imr, (unsigned)bb_irq36.isr, (unsigned)bb_irq36.base);
+    }
+}
+/* BB_AUDIO_V1: core 1 (bb_lcd_console.c) consumes the PCM ring through these */
+uint32_t bb_snd_pcm_read(uint8_t *dst, uint32_t n)
+{
+    return __atomic_load_n(&bb_snd_ready, __ATOMIC_ACQUIRE) ? bb_snd_ring_get(&bb_snd.pcm, dst, n) : 0u;
+}
+uint32_t bb_snd_pcm_avail(void)
+{
+    return __atomic_load_n(&bb_snd_ready, __ATOMIC_ACQUIRE) ? bb_snd_ring_used(&bb_snd.pcm) : 0u;
+}
+uint32_t bb_snd_pcm_rate(void) { return __atomic_load_n(&bb_snd.pcm_rate_hz, __ATOMIC_ACQUIRE); }
+void bb_audio_diag(unsigned long out[9]);          /* bb_lcd_console.c */
+static void bb_snd_live_init(void)
+{
+    static uint8_t *pcm, *midi;
+    const BbSndHost h = { bb_snd_read_phys, bb_snd_raise_irq, NULL, BB_SND_TRACE ? bb_snd_trace_port : NULL };
+    if (!pcm) pcm = (uint8_t *)bb_meta_calloc(8192u, 1u);
+    if (!midi) midi = (uint8_t *)bb_meta_calloc(1024u, 1u);
+    if (!pcm || !midi) { printf("[bb-snd] OFF: no metadata pool memory for the rings\n"); return; }
+    bb_snd_init(&bb_snd, &h, pcm, 8192u, midi, 1024u, bb_now_us());
+    __atomic_store_n(&bb_snd_ready, 1u, __ATOMIC_RELEASE);
+    printf("[bb-snd] Sound Blaster 2.0 at %03X IRQ %u DMA %u, MPU-401 at %03X\n",
+           (unsigned)BB_SND_SB_BASE, (unsigned)BB_SND_SB_IRQ, (unsigned)BB_SND_SB_DMA, (unsigned)BB_SND_MPU_BASE);
+}
+#endif
 B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 {
     uint8_t result;
+#if BB_SND
+    bb_snd_where_native(c);
+    if(bb_kbc_in(port,&result))return result;                    /* BB_KBC_V1: before the keyboard */
+#endif
     if(bb386_kbd_port_in(port,&result))return result;   /* BB386_PMKBD_V1 */
+#if BB_SND
+    if(bb_snd_ready&&bb_snd_port_in(&bb_snd,port,&result))return result;   /* BB_SND_V1 */
+#endif
     if(bb_irq36_in(port,&result))return result;
     if(bb_pit_in(port,&result,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return result;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -1894,7 +2111,13 @@ B86_HOT static uint8_t hook_in(B86Cpu *c, uint16_t port)
 }
 B86_HOT static void hook_out(B86Cpu *c, uint16_t port, uint8_t v)
 {
+#if BB_SND
+    bb_snd_where_native(c);   /* BB_KBC_V3: 8042 writes are handled once, in bb_v35_pit_out8 */
+#endif
     if(bb_irq36_out(port,v))return;
+#if BB_SND
+    if(bb_snd_ready&&bb_snd_port_out(&bb_snd,port,v))return;   /* BB_SND_V1 */
+#endif
     bb_v61_port(port,v);
     if(bb_pit_out(port,v,bb_now_us(),(uint16_t)c->seg[B86_CS],(uint16_t)c->ip,1))return;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
@@ -1941,11 +2164,23 @@ static uint8_t bb_v35_pit_in8(MdRuntime *rt,uint16_t port,void *user) {
         }
     }
     if(bb_irq36_in(port,&v))return v;
+#if BB_SND
+    bb_snd_where_interp(rt);
+    if(bb_kbc_in(port,&v))return v;                              /* BB_KBC_V1 */
+    if(bb_snd_ready&&bb_snd_port_in(&bb_snd,port,&v))return v;   /* BB_SND_V1 */
+#endif
     if(bb_pit_in(port,&v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return v;
     return bb_v35_original_in8?bb_v35_original_in8(rt,port,user):0xffu;
 }
 static void bb_v35_pit_out8(MdRuntime *rt,uint16_t port,uint8_t v,void *user) {
+#if BB_SND
+    bb_snd_where_interp(rt);
+    bb_kbc_out(port, v);                                      /* BB_KBC_V1 (does not consume) */
+#endif
     if(bb_irq36_out(port,v))return;
+#if BB_SND
+    if(bb_snd_ready&&bb_snd_port_out(&bb_snd,port,v))return;   /* BB_SND_V1 */
+#endif
     bb_v61_port(port,v);
     if(bb_pit_out(port,v,bb_now_us(),rt->cpu.cs,rt->cpu.ip,0))return;
     if(bb_v35_original_out8)bb_v35_original_out8(rt,port,v,user);
@@ -2004,6 +2239,9 @@ static int start(MdRuntime *rt)
     bb_vga_init(rt->cpu.memory);
     bb_pit_init(bb_now_us());
     bb_irq36_init(bb_now_us());
+#if BB_SND
+    bb_snd_live_init();                                       /* BB_SND_V1 */
+#endif
     bb622_pic_pending_probe_enabled=0u; /* BB622_PIC_PENDING_V1: OFF on cold boot */
     bb622_irq0_trial_armed=0u; /* BB622_IRQ0_TRIAL_V1: OFF on cold boot */ bb622_burst_reset(&bb622_irq0_burst); /* BURST OFF on cold boot */
     bb622_cadence_reset(&bb622_irq0_cadence); /* cadence OFF on boot */
@@ -2538,10 +2776,89 @@ static void bb386_kbd_poll(void)
         fflush(stdout);
     }
 }
+#if BB_SND
+/* BB_SND_V1: advance DMA playback in real time and deliver IRQ5 in protected
+ * mode the way IRQ1 is delivered (Descent's sound driver runs under DOS/4GW).
+ * Real-mode IRQ5 delivery is not implemented yet. */
+static void bb_snd_pm_poll(void)
+{
+    if (!bb_snd_ready) return;
+    const uint64_t now = bb_now_us();
+    bb_snd_poll(&bb_snd, now);
+    if ((bb_snd.n_cmds | bb_snd.n_midi) && now - bb_snd_report_us > 10000000u) {
+        bb_snd_report_us = now;
+        printf("[bb-snd] dsp-cmds=%lu unknown=%lu irqs=%lu pm-delivered=%lu blocked=%lu dma-bytes=%lu dropped=%lu rate=%lu midi-bytes=%lu speaker=%u on-cmds=%lu off-cmds=%lu resets=%lu guest-nonsilent=%lu dma-at=%02X%04X\n",
+               bb_snd.n_cmds, bb_snd.n_unknown, bb_snd.n_irq, bb_snd_pm_irqs, bb_snd_pm_blocked, bb_snd.n_bytes,
+               bb_snd.pcm.dropped, (unsigned long)bb_snd.rate_hz, bb_snd.n_midi, (unsigned)bb_snd.speaker,
+               bb_snd.n_spk_on, bb_snd.n_spk_off, bb_snd.n_resets, bb_snd.n_guest_loud,
+               (unsigned)bb_snd.ch[BB_SND_SB_DMA].page, (unsigned)bb_snd.ch[BB_SND_SB_DMA].cur_addr);
+        {   /* BB_SND_V5 probe: what is in guest memory at the 8237 buffer, through every path? */
+            const BbDmaCh *dc = &bb_snd.ch[BB_SND_SB_DMA];
+            const uint32_t base = ((uint32_t)dc->page << 16) | dc->base_addr, len = (uint32_t)dc->base_count + 1u;
+            unsigned long loud_phys = 0, loud_lin = 0;
+            uint8_t first[16];
+            for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) {
+                const uint8_t v = *b86_host_phys(&C, base + i);
+                if (i < 16u) first[i] = v;
+                if (v < 126u || v > 130u) ++loud_phys;
+                const uint8_t *pl = b86_host(&C, base + i);
+                if (pl) { const uint8_t w = *pl; if (w < 126u || w > 130u) ++loud_lin; }
+            }
+            printf("[bb-snd-probe] dma-buffer=%05lX len=%lu nonsilent-phys=%lu nonsilent-linear=%lu pg=%u C.mem=%p rt.mem=%p first=",
+                   (unsigned long)base, (unsigned long)len, loud_phys, loud_lin, (unsigned)C.pg, (void *)C.mem, (void *)(R ? R->cpu.memory : NULL));
+            for (unsigned i = 0; i < 16u && i < len; ++i) printf("%02X", first[i]);
+            printf("\n");
+            /* BB_SND_V6 write probe: markers (7Fh, near-silence) written 10 s ago that are
+             * still there = bytes the game did NOT write. Then mark the buffer again. */
+            {   static uint32_t mark_base, mark_len;
+                unsigned long survived = 0;
+                if (mark_len && mark_base == base && mark_len == len)
+                    for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) if (*b86_host_phys(&C, base + i) == 0x7Fu) ++survived;
+                printf("[bb-snd-probe] write-probe: %lu of %lu marker bytes survived 10 s (%s); pm-irq0-delivered=%lu pit0-reload=%lu\n",
+                       survived, (unsigned long)(mark_len ? mark_len : len),
+                       !mark_len ? "first report: marking" : survived == mark_len ? "NOBODY wrote the buffer" : "the game writes the buffer",
+                       (unsigned long)bb386_pmirq_delivered, (unsigned long)bb_pit.c[0].reload_raw);
+                if (dc->mode && (((dc->mode >> 2) & 3u) == 2u) && len >= 16u) {
+                    for (uint32_t i = 0; i < len && base + i < B86_RAM_BYTES; ++i) *b86_host_phys(&C, base + i) = 0x7Fu;
+                    mark_base = base; mark_len = len;
+                }
+            }
+        }
+        unsigned long au[9];
+        bb_audio_diag(au);
+        printf("[bb-audio] status=%lu (1=playing 2=no PIO 3=no DMA 4=no memory 0=not started) frames-out=%lu pcm-bytes-in=%lu dma-underruns=%lu starved=%lu in-rate=%lu ring-check=%lu (0=ok) peak-out=%lu nonsilent-in=%lu\n",
+               au[0], au[1], au[2], au[3], au[4], au[5], au[6], au[7], au[8]);
+    }
+    const uint8_t bit = (uint8_t)(1u << BB_SND_SB_IRQ);
+    if (!(bb_irq36.irr & bit) || (bb_irq36.imr & bit) || (bb_irq36.isr & (uint8_t)((bit << 1) - 1u))) return;
+    if (BB386_PM_IRQ0 && (bb_irq36.irr & 1u) && !(bb_irq36.imr & 1u)) return;   /* IRQ0 first */
+    if (!b86_irq(&C, (uint8_t)(bb_irq36.base + BB_SND_SB_IRQ))) {
+        if (!bb_snd_pm_blocked++ && bb_snd_trace_room()) {
+            ++bb_snd_trace_n;
+            printf("[bb-snd-trace] #%u IRQ5 blocked (IF=0 or mid-transition) at %04X:%08lX\n", bb_snd_trace_n,
+                   (unsigned)(uint16_t)C.seg[B86_CS], (unsigned long)C.ip);
+        }
+        return;
+    }
+    if (bb_snd_trace_room() && bb_snd_irq_traced < 30u) {
+        ++bb_snd_irq_traced; bb_snd_trace_flush();
+        ++bb_snd_trace_n;
+        printf("[bb-snd-trace] #%u IRQ5 delivered as INT %02X in PM, return %04X:%08lX, auto-eoi=%u\n", bb_snd_trace_n,
+               (unsigned)(bb_irq36.base + BB_SND_SB_IRQ), (unsigned)(uint16_t)C.seg[B86_CS], (unsigned long)C.ip,
+               (unsigned)bb_irq36.auto_eoi);
+    }
+    bb_irq36.irr &= (uint8_t)~bit;
+    if (!bb_irq36.auto_eoi) bb_irq36.isr |= bit;
+    ++bb_snd_pm_irqs;
+}
+#endif
 static void bb386_pmirq_poll(void)
 {
     if (C.model < B86_CPU_386 || !(C.msw & 1u)) return;
     bb386_kbd_poll();                                         /* BB386_PMKBD_V1 */
+#if BB_SND
+    bb_snd_pm_poll();                                         /* BB_SND_V1 */
+#endif
     if (!BB386_PM_IRQ0) return;  /* IRQ1 is independently enabled */
     bb_irq36_schedule(bb_now_us());
     if (!(bb_irq36.irr & 1u) || (bb_irq36.imr & 1u) || (bb_irq36.isr & 1u)) return;
@@ -3125,6 +3442,7 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     /* Cooperative VGA presentation: one 12-row tile per eligible dispatch.
        Each call returns quickly so DOS execution and USB keyboard service continue.
        The LCD presenter maintains its own 1 ms strip cadence. */
+    { extern void bb_audio_boot_tick(void); bb_audio_boot_tick(); }   /* BB_AUDIO_V3: audio in every mode */
     if (bb_video_seen) {
         uint64_t t=bb_now_us();
         bb_lcd_vga_tick();

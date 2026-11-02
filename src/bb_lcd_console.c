@@ -440,11 +440,251 @@ static void bb_v27_convert(unsigned top, uint16_t *dst) {
 #error "Stage5D LCD max field Hz must be 0..120"
 #endif
 
+/* BB_CORE1_SRAM_WAIT_V1: core 1 waits in SRAM. sleep_us() on core 1 is woken
+ * by the default alarm pool, whose interrupt runs on CORE 0 (~300 interrupts/s
+ * from the pacer, handler in flash); SDK busy-waits and the ILI9341 wait loops
+ * run from flash, and the Cortex-M33 has no instruction cache, so a spinning
+ * core 1 keeps fetching through the XIP interface core 0 needs for PSRAM code
+ * and data. These loops read the same registers from SRAM. */
+#ifndef BB_CORE1_SRAM_WAIT
+#define BB_CORE1_SRAM_WAIT 1
+#endif
+
+/* BB_AUDIO_V1: core 1 plays the guest's Sound Blaster PCM through MicroWave's
+ * PIO I2S program (MAX98357A wiring as in microconsole: BCLK GP10, LRCLK GP11,
+ * DATA GP20; PIO1 SM0). A 4 KiB ring (1024 stereo frames) in PSRAM, written
+ * and read through the UNCACHED alias, is streamed endlessly by one DMA
+ * channel (read-ring wrap, no interrupts). Core 1 keeps ~23 ms queued ahead of
+ * the DMA from its SRAM wait loops; the producer resamples the card's 8-bit
+ * samples (bb_snd_pcm_*, exported by bb_live.c) to BB_AUDIO_RATE with linear
+ * interpolation. Requires BB_CORE1_SRAM_WAIT. BB_AUDIO=0: none of this. */
+#ifndef BB_AUDIO
+#define BB_AUDIO 1
+#endif
+#if BB_AUDIO && !BB_CORE1_SRAM_WAIT
+#undef BB_AUDIO
+#define BB_AUDIO 0
+#endif
+#if BB_AUDIO
+#include "hardware/pio.h"
+#include "hardware/dma.h"
+#include "bb_mw_i2s.pio.h"
+#ifndef BB_AUDIO_RATE
+#define BB_AUDIO_RATE 22050u
+#endif
+#ifndef BB_AUDIO_PIN_BCLK
+#define BB_AUDIO_PIN_BCLK 10u            /* LRCLK is BCLK + 1 */
+#endif
+#ifndef BB_AUDIO_PIN_DATA
+#define BB_AUDIO_PIN_DATA 20u
+#endif
+#ifndef BB_AUDIO_PIO
+#define BB_AUDIO_PIO pio1
+#endif
+#ifndef BB_AUDIO_SM
+#define BB_AUDIO_SM 0u
+#endif
+#ifndef BB_AUDIO_VOLUME
+#define BB_AUDIO_VOLUME 192u             /* of 256 */
+#endif
+#define BB_AU_FRAMES 1024u               /* ring: 1024 frames x 4 bytes = 4 KiB */
+#define BB_AU_RING_BITS 12u
+#define BB_AU_LEAD 512u                  /* keep ~23 ms queued ahead of the DMA */
+#define BB_AU_CHUNK 64u                  /* refill granularity */
+extern uint32_t bb_snd_pcm_read(uint8_t *dst, uint32_t n);
+extern uint32_t bb_snd_pcm_avail(void);
+extern uint32_t bb_snd_pcm_rate(void);
+extern void *bb_meta_calloc(size_t n, size_t size);
+static volatile uint32_t *bb_au_ring;
+static int bb_au_dma = -1;
+static uint32_t bb_au_w, bb_au_phase, bb_au_rate, bb_au_step;
+static int32_t bb_au_prev, bb_au_cur;
+static uint8_t bb_au_playing, bb_au_in[64];
+static uint32_t bb_au_in_n, bb_au_in_i;
+/* status, frames out, pcm bytes in, dma underruns, starved, rate,
+ * ring check (0 = ok; uncached read-back mismatches + 1000 x cached read-back mismatches),
+ * peak |output| since the last report, non-silent input bytes since the last report */
+static volatile unsigned long bb_au_n[9];
+static uint32_t *bb_au_ring_cached;              /* BB_AUDIO_V2: same memory, cached alias (self-check only) */
+static uint32_t bb_au_tone_left, bb_au_tone_phase;   /* BB_AUDIO_V2: start-up test tone */
+
+/* frames the DMA has not yet read, from SRAM (no flash fetch while waiting) */
+static inline __attribute__((always_inline)) uint32_t bb_au_ahead(void)
+{
+    const uint32_t r = (((uint32_t)dma_hw->ch[bb_au_dma].read_addr - (uint32_t)(uintptr_t)bb_au_ring) >> 2) & (BB_AU_FRAMES - 1u);
+    return (bb_au_w - r) & (BB_AU_FRAMES - 1u);
+}
+static inline __attribute__((always_inline)) int bb_au_need(void)
+{
+    if (bb_au_dma < 0) return 0;
+    const uint32_t a = bb_au_ahead();
+    return a + BB_AU_CHUNK <= BB_AU_LEAD || a > BB_AU_LEAD + 128u;
+}
+static int bb_au_byte(uint8_t *b)
+{
+    if (bb_au_in_i == bb_au_in_n) {
+        bb_au_in_n = bb_snd_pcm_read(bb_au_in, sizeof bb_au_in); bb_au_in_i = 0;
+        bb_au_n[2] += bb_au_in_n;
+        if (!bb_au_in_n) return 0;
+    }
+    *b = bb_au_in[bb_au_in_i++];
+    if (*b < 126u || *b > 130u) ++bb_au_n[8];     /* BB_AUDIO_V2 level meter */
+    return 1;
+}
+static int32_t bb_au_next_sample(void)
+{
+    if (!bb_au_playing) {
+        if (bb_au_in_i == bb_au_in_n && bb_snd_pcm_avail() < 512u) return 0;   /* ~46 ms pre-buffer */
+        bb_au_playing = 1; bb_au_phase = 0; bb_au_prev = bb_au_cur = 0;
+    }
+    bb_au_phase += bb_au_step;
+    while (bb_au_phase >= 65536u) {
+        uint8_t b;
+        bb_au_phase -= 65536u;
+        if (!bb_au_byte(&b)) { bb_au_playing = 0; ++bb_au_n[4]; bb_au_prev = bb_au_cur = 0; return 0; }
+        bb_au_prev = bb_au_cur; bb_au_cur = ((int32_t)b - 128) * 256;
+    }
+    const int32_t v = bb_au_prev + (((bb_au_cur - bb_au_prev) * (int32_t)(bb_au_phase >> 1)) >> 15);
+    return (v * (int32_t)BB_AUDIO_VOLUME) >> 8;
+}
+/* producer (flash): fill the ring up to BB_AU_LEAD frames ahead of the DMA */
+static void __noinline bb_au_pump(void)
+{
+    if (bb_au_dma < 0) return;
+    const uint32_t rate = bb_snd_pcm_rate();
+    if (rate != bb_au_rate) { bb_au_rate = rate; bb_au_step = (uint32_t)(((uint64_t)rate << 16) / BB_AUDIO_RATE); bb_au_n[5] = rate; }
+    uint32_t ahead = bb_au_ahead();
+    if (ahead > BB_AU_LEAD + 128u) {                  /* the DMA overtook the writer: resynchronise */
+        ++bb_au_n[3];
+        const uint32_t r = (bb_au_w - ahead) & (BB_AU_FRAMES - 1u);
+        bb_au_w = (r + BB_AU_CHUNK) & (BB_AU_FRAMES - 1u);
+        ahead = BB_AU_CHUNK;
+    }
+    for (uint32_t todo = ahead < BB_AU_LEAD ? BB_AU_LEAD - ahead : 0u; todo; --todo) {
+        int32_t s = bb_au_next_sample();
+        if (bb_au_tone_left) {                        /* BB_AUDIO_V2: 1 s, 880 Hz triangle at start-up */
+            --bb_au_tone_left;
+            bb_au_tone_phase += (uint32_t)(((uint64_t)880u << 32) / BB_AUDIO_RATE);
+            const int32_t tri = (int32_t)(bb_au_tone_phase >> 16);          /* 0..65535 */
+            s += ((tri < 32768 ? tri : 65535 - tri) - 16384) / 2;           /* +-8192 */
+            if (s > 32767) s = 32767;
+            if (s < -32768) s = -32768;
+        }
+        { const unsigned long m = (unsigned long)(s < 0 ? -s : s); if (m > bb_au_n[7]) bb_au_n[7] = m; }
+        bb_au_ring[bb_au_w] = ((uint32_t)(uint16_t)s << 16) | (uint16_t)s;   /* left | right */
+        bb_au_w = (bb_au_w + 1u) & (BB_AU_FRAMES - 1u);
+        ++bb_au_n[1];
+    }
+}
+/* BB_AUDIO_V3: XIP cache maintenance by address (RP2350; 8-byte lines): op 3
+ * cleans (writes back a dirty line), op 2 invalidates. */
+static void bb_au_cache_drop(uintptr_t cached_addr, uint32_t bytes, int clean_first)
+{
+    const uintptr_t off0 = (cached_addr - 0x10000000u) & ~(uintptr_t)7u;
+    const uintptr_t end = cached_addr - 0x10000000u + bytes;
+    if (clean_first)
+        for (uintptr_t o = off0; o < end; o += 8u) *(volatile uint8_t *)(0x18000000u + o + 3u) = 0;
+    for (uintptr_t o = off0; o < end; o += 8u) *(volatile uint8_t *)(0x18000000u + o + 2u) = 0;
+    __asm volatile ("dsb 0xF\n\tisb 0xF" ::: "memory");
+}
+/* BB_AUDIO_V2: core 0, before core 1 starts - bb_meta_calloc is core 0's allocator.
+ * Self-check: a pattern written through the uncached alias must read back
+ * through both aliases (otherwise the DMA would stream something else). */
+static void bb_au_prepare(void)
+{
+    uint8_t *raw = (uint8_t *)bb_meta_calloc(2u * BB_AU_FRAMES * 4u, 1u);
+    if (!raw) { bb_au_n[0] = 4u; return; }
+    uintptr_t a = ((uintptr_t)raw + (BB_AU_FRAMES * 4u - 1u)) & ~(uintptr_t)(BB_AU_FRAMES * 4u - 1u);
+    bb_au_ring_cached = (uint32_t *)a;
+    const int psram = a >= 0x11000000u && a < 0x12000000u;
+    if (psram) a += 0x04000000u;                                    /* PSRAM: uncached alias */
+    bb_au_ring = (volatile uint32_t *)a;
+    /* BB_AUDIO_V3: bb_meta_calloc zeroed this memory through the CACHED alias,
+     * which can leave (dirty) lines in the XIP cache; evicted later they would
+     * overwrite what core 1 writes through the uncached alias. Clean, then
+     * invalidate, every line of the range (the SDK's xip_cache_maintain method). */
+    if (psram) bb_au_cache_drop((uintptr_t)raw, 2u * BB_AU_FRAMES * 4u, 1);
+    unsigned long bad_u = 0, bad_c = 0;
+    for (uint32_t i = 0; i < BB_AU_FRAMES; ++i) bb_au_ring[i] = 0x9E3779B1u * (i + 1u);
+    for (uint32_t i = 0; i < BB_AU_FRAMES; ++i) if (bb_au_ring[i] != 0x9E3779B1u * (i + 1u)) ++bad_u;
+    if (psram) bb_au_cache_drop((uintptr_t)bb_au_ring_cached, BB_AU_FRAMES * 4u, 0);
+    for (uint32_t i = 0; i < BB_AU_FRAMES; ++i)
+        if (((volatile uint32_t *)bb_au_ring_cached)[i] != 0x9E3779B1u * (i + 1u)) ++bad_c;
+    if (psram) bb_au_cache_drop((uintptr_t)bb_au_ring_cached, BB_AU_FRAMES * 4u, 0);   /* nothing of it stays cached */
+    bb_au_n[6] = bad_u + 1000u * bad_c;
+    for (uint32_t i = 0; i < BB_AU_FRAMES; ++i) bb_au_ring[i] = 0u;
+}
+/* called once on core 1; any failure leaves audio off and the LCD unaffected */
+static void bb_au_start(void)
+{
+    PIO pio = BB_AUDIO_PIO;
+    if (!bb_au_ring) return;                          /* bb_au_prepare failed (status 4) */
+    if (pio_sm_is_claimed(pio, BB_AUDIO_SM) || !pio_can_add_program(pio, &mw_i2s_program)) { bb_au_n[0] = 2u; return; }
+    pio_sm_claim(pio, BB_AUDIO_SM);
+    const uint off = pio_add_program(pio, &mw_i2s_program);
+    pio_gpio_init(pio, BB_AUDIO_PIN_DATA);
+    pio_gpio_init(pio, BB_AUDIO_PIN_BCLK);
+    pio_gpio_init(pio, BB_AUDIO_PIN_BCLK + 1u);
+    mw_i2s_program_init(pio, BB_AUDIO_SM, off, BB_AUDIO_PIN_DATA, BB_AUDIO_PIN_BCLK);
+    const uint32_t sys_hz = clock_get_hz(clk_sys);
+    const uint32_t div256 = (uint32_t)((((uint64_t)sys_hz * 4u) + BB_AUDIO_RATE / 2u) / BB_AUDIO_RATE);
+    pio_sm_set_clkdiv_int_frac(pio, BB_AUDIO_SM, (uint16_t)(div256 >> 8), (uint8_t)(div256 & 0xFFu));
+    const int ch = dma_claim_unused_channel(false);
+    if (ch < 0) { bb_au_n[0] = 3u; return; }
+    dma_channel_config c = dma_channel_get_default_config((uint)ch);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_ring(&c, false, BB_AU_RING_BITS);
+    channel_config_set_dreq(&c, pio_get_dreq(pio, BB_AUDIO_SM, true));
+    dma_channel_configure((uint)ch, &c, &pio->txf[BB_AUDIO_SM], (const void *)bb_au_ring,
+                          dma_encode_endless_transfer_count(), true);
+    bb_au_w = BB_AU_LEAD;                             /* start with half a ring of silence */
+    bb_au_tone_left = BB_AUDIO_RATE;                  /* BB_AUDIO_V2: then a 1 s test tone */
+    bb_au_dma = ch;
+    pio_sm_set_enabled(pio, BB_AUDIO_SM, true);
+    bb_au_n[0] = 1u;
+}
+#define BB_AU_SERVICE() do { if (bb_au_need()) bb_au_pump(); } while (0)
+/* for core 0's report line */
+void bb_audio_diag(unsigned long out[9])
+{
+    for (unsigned i = 0; i < 9u; ++i) out[i] = bb_au_n[i];
+    bb_au_n[7] = 0; bb_au_n[8] = 0;                   /* level meters restart each report */
+}
+#else
+#define BB_AU_SERVICE() ((void)0)
+void bb_audio_diag(unsigned long out[9]) { for (unsigned i = 0; i < 9u; ++i) out[i] = 0u; }
+#endif
+#if BB_CORE1_SRAM_WAIT
+#include "hardware/dma.h"
+#include "hardware/timer.h"
+/* Wait until the LCD strip's DMA has finished and the SPI has drained - the two
+ * loops mr_pico_ili9341_flush_wait() runs - so that call then falls through. */
+static void __noinline __not_in_flash_func(bb_c1_lcd_settle)(void) {
+    if (!lcd.dma_active) return;
+    while (dma_hw->ch[lcd.dma_chan].al1_ctrl & DMA_CH0_CTRL_TRIG_BUSY_BITS) { BB_AU_SERVICE(); }
+    while (spi_get_hw(lcd.spi)->sr & SPI_SSPSR_BSY_BITS) { BB_AU_SERVICE(); }
+}
+static void __noinline __not_in_flash_func(bb_c1_wait_us)(uint32_t us) {
+    const uint32_t t0 = timer_hw->timerawl;
+    while ((uint32_t)(timer_hw->timerawl - t0) < us) { BB_AU_SERVICE(); }
+}
+#define BB_C1_WAIT_US(us) bb_c1_wait_us(us)
+#define BB_C1_LCD_SETTLE() bb_c1_lcd_settle()
+#else
+#define BB_C1_WAIT_US(us) sleep_us(us)
+#define BB_C1_LCD_SETTLE() ((void)0)
+#endif
+
 static void bb_v27_presenter(void) {
+#if BB_AUDIO
+    bb_au_start();                                   /* BB_AUDIO_V1: on core 1 */
+#endif
     for (;;) {
         if (!__atomic_load_n(&bb_v27_request,__ATOMIC_ACQUIRE)) {
             __atomic_store_n(&bb_v27_parked,1u,__ATOMIC_RELEASE);
-            sleep_us(1000u);
+            BB_C1_WAIT_US(1000u);
             continue;
         }
         __atomic_store_n(&bb_v27_parked,0u,__ATOMIC_RELEASE);
@@ -471,10 +711,11 @@ static void bb_v27_presenter(void) {
             /* Convert next strip while SPI DMA transfers current strip. */
             t=time_us_32();
             bb_v27_convert(BB_V32_DEST_Y(i,field_parity),bb_v27_tiles[next]);
+            BB_AU_SERVICE();                         /* BB_AUDIO_V1 */
             convert_total+=(uint32_t)(time_us_32()-t);
             t=time_us_32();
             __atomic_store_n(&bb_v29_stage,3u,__ATOMIC_RELAXED);
-            mr_pico_ili9341_flush_wait(NULL,&lcd);
+            BB_C1_LCD_SETTLE(); mr_pico_ili9341_flush_wait(NULL,&lcd);
             __atomic_store_n(&bb_v29_heartbeat_us,time_us_32(),__ATOMIC_RELAXED);
             dma_total+=(uint32_t)(time_us_32()-t);
             __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
@@ -486,7 +727,7 @@ static void bb_v27_presenter(void) {
             current=next;
         }
         t=time_us_32();
-        mr_pico_ili9341_flush_wait(NULL,&lcd);
+        BB_C1_LCD_SETTLE(); mr_pico_ili9341_flush_wait(NULL,&lcd);
         dma_total+=(uint32_t)(time_us_32()-t);
         __atomic_add_fetch(&bb_v27_strips,1u,__ATOMIC_RELAXED);
         const uint32_t frame_us=(uint32_t)(time_us_32()-frame_start);
@@ -509,7 +750,7 @@ static void bb_v27_presenter(void) {
 stop_presenting:
         /* On return to text mode, release LCD ownership before core 0
            redraws the DOS console.  Never leave DMA in flight. */
-        mr_pico_ili9341_flush_wait(NULL,&lcd);
+        BB_C1_LCD_SETTLE(); mr_pico_ili9341_flush_wait(NULL,&lcd);
         __atomic_store_n(&bb_v27_busy,0u,__ATOMIC_RELEASE);
 #if BB_STAGE5D_VGA_MAX_FIELD_HZ != 0
         /* Both DMA buffers are free here. Core 0 can still park us on a
@@ -520,14 +761,40 @@ stop_presenting:
             const uint32_t period=1000000u / BB_STAGE5D_VGA_MAX_FIELD_HZ;
             if (elapsed>=period) break;
             const uint32_t remaining=period-elapsed;
-            sleep_us(remaining>1000u?1000u:remaining);
+            BB_C1_WAIT_US(remaining>1000u?1000u:remaining);
         }
 #endif
     }
 }
 
+/* BB_AUDIO_V3: called by bb_live.c on every dispatch, in every video mode
+ * (bb_lcd_vga_tick runs only once a program has set a video mode) */
+void bb_audio_boot_tick(void)
+{
+#if BB_AUDIO
+    if (!active || bb_v27_started) return;
+    bb_au_prepare();
+    printf("[bb-audio] core 1 audio: ring %p (cached %p) self-check=%lu (0=ok), I2S BCLK GP%u LRCLK GP%u DATA GP%u at %u Hz, 1 s test tone\n",
+           (void *)bb_au_ring, (void *)bb_au_ring_cached, bb_au_n[6], (unsigned)BB_AUDIO_PIN_BCLK,
+           (unsigned)(BB_AUDIO_PIN_BCLK + 1u), (unsigned)BB_AUDIO_PIN_DATA, (unsigned)BB_AUDIO_RATE);
+    fflush(stdout);
+    bb_v27_started = 1u;
+    multicore_launch_core1(bb_v27_presenter);       /* parked until VGA; keeps audio flowing */
+#endif
+}
 void bb_lcd_vga_tick(void) {
     if (!active) return;
+#if BB_AUDIO
+    if (!bb_v27_started) {      /* BB_AUDIO_V2: core 1 from the first tick, so text-mode programs have sound */
+        bb_au_prepare();        /* core 0: the ring from the metadata pool */
+        printf("[bb-audio] core 1 audio: ring %p (cached %p) self-check=%lu (0=ok), I2S BCLK GP%u LRCLK GP%u DATA GP%u at %u Hz, 1 s test tone\n",
+               (void *)bb_au_ring, (void *)bb_au_ring_cached, bb_au_n[6], (unsigned)BB_AUDIO_PIN_BCLK,
+               (unsigned)(BB_AUDIO_PIN_BCLK + 1u), (unsigned)BB_AUDIO_PIN_DATA, (unsigned)BB_AUDIO_RATE);
+        fflush(stdout);
+        bb_v27_started = 1u;
+        multicore_launch_core1(bb_v27_presenter);   /* parked until VGA; keeps audio flowing */
+    }
+#endif
     if (bb_vga_active()) {
         /* v34: clear the physical margins left by the old 80x25 DOS HUD.
            Presenter only writes LCD rows 10..309.  On a mode transition,
