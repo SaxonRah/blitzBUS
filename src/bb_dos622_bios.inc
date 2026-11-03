@@ -237,6 +237,7 @@ static bool BB622_FLASH bb622_bios_interrupt(MdRuntime *rt, uint8_t vector, void
 {
     MdX86 *c = &rt->cpu;
     bb622_watch_bios(rt, vector);
+    bb_tick_vec(vector);                          /* BB_TICK_V1 */
     switch (vector) {
     case 0x14u: return bb622_serial14(rt);
     case 0x17u: return bb622_printer17(rt);

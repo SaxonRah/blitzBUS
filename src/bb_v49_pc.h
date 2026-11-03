@@ -17,6 +17,7 @@ static volatile uint32_t bb49_enabled;
 /* BB_GPC_V1: guest CS:EIP and mode beside each host PC (rings in PSRAM, set up by
  * bb_live.c): bits 0-15 CS, 16 PE, 17 32-bit code segment (D), 18 paging. */
 static B86Cpu *volatile bb49_cpu;
+static const volatile uint8_t *volatile bb49_isr;   /* BB_GPC_V2: the PIC's in-service bits (bits 24-31) */
 static uint32_t *volatile bb49_geip, *volatile bb49_gcs;
 static uint32_t bb49_previous;
 static uint32_t bb49_ignored;
@@ -74,7 +75,8 @@ __attribute__((noinline,used)) static void bb49_capture_frame(
         const uint32_t gi = bb49_seq & (BB49_COUNT-1u);
         bb49_geip[gi] = g->ip;
         bb49_gcs[gi] = (uint32_t)(uint16_t)g->seg[B86_CS] | ((uint32_t)(g->msw & 1u) << 16) |
-                       ((uint32_t)((g->pm386.seg[B86_CS].flags >> 2) & 1u) << 17) | ((uint32_t)(g->pg != 0) << 18);
+                       ((uint32_t)((g->pm386.seg[B86_CS].flags >> 2) & 1u) << 17) | ((uint32_t)(g->pg != 0) << 18) |
+                       ((uint32_t)(bb49_isr ? *bb49_isr : 0u) << 24);   /* BB_GPC_V2 */
     }
     bb49_pc[bb49_seq & (BB49_COUNT-1u)] = pc;
     if (bb49_lr) bb49_lr[bb49_seq & (BB49_COUNT-1u)] = lr;   /* BB_V90_LR */

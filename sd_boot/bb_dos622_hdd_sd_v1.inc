@@ -245,6 +245,90 @@ static FRESULT bb_life_v2_sync(FIL *f)
 }
 /* END BB622_HDD_LIFE_V2 HELPER */
 
+/* BB_DPMI_SWAP_V1: swap store for the DPMI host's virtual memory:
+ * <drive>/BLITZBUS/DPMISWAP.BIN, 16 MB, created and extended on first use.
+ * The FIL (with its sector buffer) and the fast-seek map live in PSRAM. */
+extern void *bb_meta_calloc(size_t n, size_t size);
+typedef struct { FIL fil; DWORD clmt[128]; char path[64]; uint8_t open, tried; uint32_t unsynced, errors, reads, writes; } BbDpmiSwap;
+static BbDpmiSwap *bb_dpmi_swap;
+#define BB_DPMI_SWAP_BYTES (16u << 20)
+static bool bb_dpmi_swap_ready(void)
+{
+    BbDpmiSwap *w;
+    FRESULT fr;
+    if (bb_dpmi_swap && bb_dpmi_swap->open) return true;
+    if (bb_dpmi_swap && bb_dpmi_swap->tried) return false;
+    if (!bb_dpmi_swap) bb_dpmi_swap = (BbDpmiSwap *)bb_meta_calloc(1u, sizeof(BbDpmiSwap));
+    if (!bb_dpmi_swap) return false;
+    w = bb_dpmi_swap; w->tried = 1u;
+    {   /* same card and prefix as the boot images (bb_sd_boot.c) */
+        sd_card_t *sd = sd_get_by_num(0u);
+        const char *drive = sd ? sd_get_drive_prefix(sd) : NULL;
+        if (!drive || snprintf(w->path, sizeof w->path, "%s/BLITZBUS/DPMISWAP.BIN", drive) >= (int)sizeof w->path) return false;
+    }
+    bb622_retime_spi1();
+    fr = f_open(&w->fil, w->path, FA_READ | FA_WRITE | FA_OPEN_ALWAYS);
+    if (fr != FR_OK) { printf("[bb-dpmi] swap file %s not opened fr=%d\n", w->path, (int)fr); return false; }
+    if (f_size(&w->fil) < BB_DPMI_SWAP_BYTES) {
+        printf("[bb-dpmi] creating swap file %s (16 MB, once)\n", w->path);
+        fr = f_lseek(&w->fil, (FSIZE_t)BB_DPMI_SWAP_BYTES);        /* write mode: extends the file */
+        if (fr == FR_OK) fr = f_sync(&w->fil);
+        if (fr != FR_OK || f_size(&w->fil) < BB_DPMI_SWAP_BYTES) {
+            printf("[bb-dpmi] swap file not extended fr=%d size=%lu\n", (int)fr, (unsigned long)f_size(&w->fil));
+            (void)f_close(&w->fil); return false;
+        }
+    }
+#if FF_USE_FASTSEEK
+    w->clmt[0] = 128u; w->fil.cltbl = w->clmt;
+    if (f_lseek(&w->fil, CREATE_LINKMAP) != FR_OK) w->fil.cltbl = 0;
+#endif
+    w->open = 1u;
+    printf("[bb-dpmi] swap file %s ready%s\n", w->path, w->fil.cltbl ? " (fast seek)" : "");
+    return true;
+}
+/* The SPI SD driver keeps a multi-block write open between calls (it streams
+ * consecutive writes as one CMD25). Code that reads the card without going
+ * through the driver - the C: image's direct reads - then talks to a card that
+ * is still waiting for write data. CTRL_SYNC closes the transaction
+ * (stop_wr_tran), so the card is idle whenever a swap call returns. */
+static void bb_dpmi_swap_quiesce(BbDpmiSwap *w)
+{
+    if (w->fil.obj.fs) (void)disk_ioctl(w->fil.obj.fs->pdrv, CTRL_SYNC, NULL);
+}
+/* FatFs keeps a hard error sticky on its FIL: after a failed transfer the
+ * file is closed and reopened (it already has its full size), then retried. */
+static void bb_dpmi_swap_reset(BbDpmiSwap *w)
+{
+    if (w->open) { bb_dpmi_swap_quiesce(w); (void)f_close(&w->fil); }
+    w->open = 0u; w->tried = 0u; w->unsynced = 0u;
+}
+bool bb_sd_dpmi_swap(uint32_t slot, uint8_t *page, int write)
+{
+    if (!page || slot >= (BB_DPMI_SWAP_BYTES >> 12)) return false;
+    for (unsigned attempt = 0; attempt < 4u; ++attempt) {
+        BbDpmiSwap *w;
+        UINT n = 0;
+        FRESULT fr;
+        if (!bb_dpmi_swap_ready()) return false;
+        w = bb_dpmi_swap;
+        bb622_retime_spi1();
+        fr = f_lseek(&w->fil, (FSIZE_t)slot * 4096u);
+        if (fr == FR_OK) fr = write ? f_write(&w->fil, page, 4096u, &n) : f_read(&w->fil, page, 4096u, &n);
+        if (fr == FR_OK && write && ++w->unsynced >= 32u) { w->unsynced = 0; fr = f_sync(&w->fil); }
+        if (write) bb_dpmi_swap_quiesce(w);              /* never leave a multi-block write open */
+        if (fr == FR_OK && n == 4096u) {
+            if (write) ++w->writes; else ++w->reads;
+            if (attempt) printf("[bb-dpmi] swap %s slot %lu recovered on attempt %u\n", write ? "write" : "read", (unsigned long)slot, attempt + 1u);
+            return true;
+        }
+        if (++w->errors <= 16u)
+            printf("[bb-dpmi] swap %s slot %lu FAIL fr=%d n=%u (attempt %u, reopening)\n", write ? "write" : "read", (unsigned long)slot, (int)fr, (unsigned)n, attempt + 1u);
+        bb_dpmi_swap_reset(w);
+        sleep_ms(2u << attempt);
+    }
+    return false;
+}
+
 #define bb_sd_hdd_read_sector bb_sd_hdd_read_sector_raw   /* BB_SD_PERF_V1 */
 bool bb_sd_hdd_read_sector(uint32_t lba,uint8_t *buf,size_t size)
 {

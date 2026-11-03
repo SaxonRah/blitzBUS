@@ -20,6 +20,19 @@
 #include "bb_vga.h"
 #include "bb_vga.c"
 #include "bb_snd.c"   /* BB_SND_V1: Sound Blaster 2.0 + 8237 DMA + MPU-401 */
+/* BB_TICK_V1: per-interval counters for the timer/mode-switch analysis (diagnostic). */
+#define BB_TICK_COLD __attribute__((noinline, section(".text.bb_tick")))   /* BB_TICK_V2: never in SRAM */
+static void BB_TICK_COLD bb_tick_vec(uint8_t vector);
+void *bb_meta_calloc(size_t n, size_t size);   /* defined below; declared here for bb_tick_get */
+/* all state in one PSRAM block (bb_meta_calloc); only this pointer is in SRAM */
+typedef struct BbTick {
+    uint32_t vecn[512];                     /* BIOS calls per vector: [0..255] now, [256..511] last report */
+    uint64_t last_us, l_edges, l_deliv, l_coal, l_eoi;
+    unsigned long pm_entries, pg_on, l_ent, l_pg;
+    int pg_was;
+} BbTick;
+static BbTick *bb_tick;
+static BbTick * BB_TICK_COLD bb_tick_get(void) { if (!bb_tick) bb_tick = (BbTick *)bb_meta_calloc(1u, sizeof(BbTick)); return bb_tick; }
 #if BB_SND
 static void bb_snd_trace_kbc(int out, uint16_t port, uint8_t val);   /* BB_SND_V2 */
 #endif
@@ -1700,8 +1713,43 @@ static int bb622_vga12_30(uint16_t *ax, uint16_t bx)
 /* BB_DOS622_ATBIOS_V1: DOS622 AT/VGA text compatibility */
 #include "bb_dos622_atbios_v1.inc"
 static unsigned bb_v61_events;
+/* BB_DPMI_V1: native DPMI 0.9 host (blitz86/src/dpmi_host.c). Off unless BB_DPMI=1.
+ * All host code is flash-pinned (DPMI_COLD); its state is one PSRAM block. */
+#ifndef BB_DPMI
+#define BB_DPMI 0
+#endif
+#if BB_DPMI
+#define DPMI_LOG(...) printf(__VA_ARGS__)
+#include "../src/dpmi_host.c"
+#ifndef BB_DPMI_PGOFF
+#define BB_DPMI_PGOFF 0          /* 1: paging off around host real-mode calls (fallback) */
+#endif
+/* swap store: BLITZBUS/DPMISWAP.BIN on the SD card (bb_dos622_hdd_sd_v1.inc) */
+extern bool bb_sd_dpmi_swap(uint32_t slot, uint8_t *page, int write);
+static int DPMI_COLD bb_dpmi_swap_rd(uint32_t slot, uint8_t *p) { return bb_sd_dpmi_swap(slot, p, 0) ? 1 : 0; }
+static int DPMI_COLD bb_dpmi_swap_wr(uint32_t slot, const uint8_t *p) { return bb_sd_dpmi_swap(slot, (uint8_t *)p, 1) ? 1 : 0; }
+static int DPMI_COLD bb_dpmi_rm(B86Cpu *c, uint8_t v)
+{
+    if (!dpmi_ready()) {
+        if (v != 0x2Fu || (c->r[B86_AX] & 0xFFFFu) != 0x1687u) return 0;   /* stay out of the way until a client asks */
+        DpmiEnv env; memset(&env, 0, sizeof env);
+        env.mem = c->mem; env.alloc = bb_meta_calloc; env.rm_trap_cs = bios_seg;
+        env.stub_seg = 0x0040u; env.stub_off = 0x00F0u;           /* BDA inter-application area, 16 bytes */
+        env.ext_base = 0x110000u; env.ext_end = (uint32_t)B86_RAM_BYTES;
+        env.swap_read = bb_dpmi_swap_rd; env.swap_write = bb_dpmi_swap_wr; env.pg_off_in_rm = BB_DPMI_PGOFF;
+        dpmi_init(&env);
+        if (!dpmi_ready()) return 0;                                  /* no PSRAM for the state: stay off */
+        printf("[bb-dpmi] host on: frames %08lX-%08lX, 16 MB virtual, swap on SD, stubs 0040:00F0%s\n", (unsigned long)env.ext_base, (unsigned long)env.ext_end, BB_DPMI_PGOFF ? ", paging off in real mode" : "");
+    }
+    return dpmi_rm_int(c, v);
+}
+static int DPMI_COLD bb_dpmi_pm_cs(void) { return dpmi_active(); }
+#endif
 B86_HOT static int hook_int(B86Cpu *c, uint8_t v)
 {
+#if BB_DPMI
+    if ((v == 0x2Fu || v >= 0xE0u) && !(c->msw & 1u) && bb_dpmi_rm(c, v)) return 1;   /* BB_DPMI_V1 */
+#endif
     /* v62: interrupt-vector traffic (INT 21h AH=25h set / AH=35h get), so a
        bad vector restored at program exit can be traced to its source */
     if (v == 0x21u) {
@@ -2349,6 +2397,7 @@ static int start(MdRuntime *rt)
     bb49_gcs = (uint32_t *)bb_meta_calloc(BB49_COUNT, sizeof(uint32_t));
     bb49_geip = (uint32_t *)bb_meta_calloc(BB49_COUNT, sizeof(uint32_t));
     bb49_cpu = &C;
+    bb49_isr = &bb_irq36.isr;                    /* BB_GPC_V2: interrupt-in-service at each sample */
     printf("[bb-gpc] guest PC sampling %s\n", bb49_gcs && bb49_geip ? "on" : "OFF (no pool memory)");
 #endif
 #endif
@@ -2862,9 +2911,69 @@ static void bb386_pmirq_poll(void)
     }
 }
 
+/* BB_TICK_V1: BIOS calls per vector (PSRAM table) and a [bb-tick] line every 10 s
+ * with per-interval deltas: IRQ0 edges / delivered / coalesced / EOIs, protected-
+ * mode entries, paging switched on, and the busiest BIOS vectors (INT 1Ch = one
+ * real-mode timer tick through the BIOS INT 08 stub; INT 16h = keyboard pass-downs). */
+static void BB_TICK_COLD bb_tick_vec(uint8_t vector)
+{
+    BbTick *t = bb_tick_get();
+    if (t) ++t->vecn[vector];
+}
+static void BB_TICK_COLD bb_tick_report(void)
+{
+    BbTick *t = bb_tick_get();
+    if (!t) return;
+    const uint64_t now = bb_now_us();
+    if (!t->last_us) { t->last_us = now; t->l_edges = bb_irq36.edges; t->l_deliv = bb_irq36.delivered; t->l_coal = bb_irq36.coalesced;
+                       t->l_eoi = bb_irq36.eois; t->l_ent = t->pm_entries; t->l_pg = t->pg_on; return; }
+    if (now - t->last_us < 10000000u) return;
+    const unsigned long ms = (unsigned long)((now - t->last_us) / 1000u);
+    char top[160]; int len = 0; top[0] = 0;
+    uint32_t *bb_tick_vecn = t->vecn;
+    {                                        /* deltas on the fly: no large stack arrays */
+        unsigned used[6] = {0}, nu = 0, i, k;
+#define BB_TICK_D(i) (bb_tick_vecn[(i)] - bb_tick_vecn[256u + (i)])
+        for (k = 0; k < 6u; ++k) {
+            unsigned best = 256u;
+            for (i = 0; i < 256u; ++i) {
+                unsigned taken = 0, q; for (q = 0; q < nu; ++q) if (used[q] == i) taken = 1;
+                if (!taken && BB_TICK_D(i) && (best == 256u || BB_TICK_D(i) > BB_TICK_D(best))) best = i;
+            }
+            if (best == 256u) break;
+            used[nu++] = best;
+            len += snprintf(top + len, sizeof top - (size_t)len, " %02X:%lu", best, (unsigned long)BB_TICK_D(best));
+        }
+        len += snprintf(top + len, sizeof top - (size_t)len, " (1C:%lu 16:%lu)", (unsigned long)BB_TICK_D(0x1Cu), (unsigned long)BB_TICK_D(0x16u));
+#undef BB_TICK_D
+        for (i = 0; i < 256u; ++i) bb_tick_vecn[256u + i] = bb_tick_vecn[i];
+    }
+    printf("[bb-tick] ms=%lu irq0: edges=%llu delivered=%llu coalesced=%llu eois=%llu | pm-entries=%lu paging-on=%lu | bios-calls:%s\n",
+           ms, (unsigned long long)(bb_irq36.edges - t->l_edges), (unsigned long long)(bb_irq36.delivered - t->l_deliv),
+           (unsigned long long)(bb_irq36.coalesced - t->l_coal), (unsigned long long)(bb_irq36.eois - t->l_eoi),
+           t->pm_entries - t->l_ent, t->pg_on - t->l_pg, top);
+#if BB_DPMI
+    if (dpmi_ready() && (now / 10000000u) % 6u == 0u) dpmi_report();   /* BB_DPMI_V1: every sixth 10 s report */
+#endif
+    t->last_us = now; t->l_edges = bb_irq36.edges; t->l_deliv = bb_irq36.delivered; t->l_coal = bb_irq36.coalesced;
+    t->l_eoi = bb_irq36.eois; t->l_ent = t->pm_entries; t->l_pg = t->pg_on;
+}
+/* BB_TICK_V2: the per-slice bookkeeping lives in flash; the (possibly SRAM-inlined)
+ * tracker only makes this one call. */
+static void BB_TICK_COLD bb_tick_slice(int pm, int was)
+{
+    BbTick *t = bb_tick_get();
+    if (!t) return;
+    const int pgnow = C.pg != 0;
+    if (pm && !was) ++t->pm_entries;
+    if (pgnow && !t->pg_was) ++t->pg_on;
+    t->pg_was = pgnow;
+    bb_tick_report();
+}
 static void bb386_pm_track(int rc)
 {
     const int pm = bb386_pm();
+    bb_tick_slice(pm, bb386_pm_was);                 /* BB_TICK_V2 */
     static unsigned long bb386_pm_entries;   /* BB386_QUIET_V1: log switches 1,2,4,8,... */
     const int bb386_loud = bb386_pm_entries < 2u || !(bb386_pm_entries & (bb386_pm_entries - 1u));
     if (pm && !bb386_pm_was) {
@@ -3096,6 +3205,17 @@ static void bb386_v15_snapshot(const char *stage, uint16_t pre_cs, uint32_t pre_
     fflush(stdout);
 }
 
+#if BB_DPMI
+static int DPMI_COLD bb_dpmi_service(B86Cpu *c, int rc, unsigned budget)
+{   /* BB_DPMI_V1: run host traps until the CPU is out of the host's code segment */
+    for (unsigned k = 0; k < 64u && rc == B86_TRAP && (c->msw & 1u) && (uint16_t)c->seg[B86_CS] == dpmi_host_cs(); ++k) {
+        dpmi_pm_trap(c);
+        bb386_pmirq_poll();
+        rc = b86_jit_run(c, budget);
+    }
+    return rc;
+}
+#endif
 B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
 {
     (void)left;
@@ -3264,6 +3384,9 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
     st.sync_us += t1 - t0;
     to_b86();
     C.trap_cs = bios_seg;
+#if BB_DPMI
+    if ((C.msw & 1u) && bb_dpmi_pm_cs()) C.trap_cs = dpmi_host_cs();   /* BB_DPMI_V1 */
+#endif
     C.irq = 0;
     C.icnt = 0;
 #ifdef BB_DEBUG
@@ -3336,6 +3459,9 @@ B86_HOT int bb_live_try(MdRuntime *rt, uint64_t left)
             rc = b86_jit_run(&C, bb_v10_budget);
         }
     }
+#if BB_DPMI
+    if (rc == B86_TRAP && (C.msw & 1u)) rc = bb_dpmi_service(&C, rc, bb_v10_budget);   /* BB_DPMI_V1 */
+#endif
     rc=bb386_v12_cold_miss(rc);
     if (bb386_v14_site) bb386_v14_snapshot("AFTER", bb386_v13_pre_cs, bb386_v13_pre_ip);
     const int bb386_v15_exit = bb386_v15_after(bb386_v13_pre_pm, (C.msw & 1u) != 0u, bb386_v15_watch);
