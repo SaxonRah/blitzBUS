@@ -341,8 +341,10 @@ static bool md_pico_set_clock(void)
     #   (byte-identical to V92).
     #   BB_DPMI = 1: native DPMI 0.9 host (DOS/4GW and other extenders run as DPMI
     #   clients); 0: off (byte-identical firmware).
+    #   BB_DPMI_DIRECT = 1: the DPMI host delivers hardware interrupts straight to
+    #   the application's handler (skips DOS/4G's 16-bit wrapper); 0: via the client.
     fast_sw = {}
-    for name, default in (("BB_MEASURE_V90", "0"), ("BB_MEASURE_V91", "0"), ("BB_PM16_ADAPTIVE", "1"), ("BB_PM16_LINK", "1"), ("BB_DPMI", "0")):
+    for name, default in (("BB_MEASURE_V90", "0"), ("BB_MEASURE_V91", "0"), ("BB_PM16_ADAPTIVE", "1"), ("BB_PM16_LINK", "1"), ("BB_DPMI", "0"), ("BB_DPMI_DIRECT", "1")):
         fast_sw[name] = os.environ.get(name, default)
         if fast_sw[name] not in ("0", "1"):
             raise SystemExit("%s must be 0 or 1 (got %r)" % (name, fast_sw[name]))
@@ -383,7 +385,7 @@ target_compile_definitions(blitzbus_pico_b86_dos PRIVATE
     BLITZBUS_LCD_CONSOLE=1
     MR_LCD_PANEL_ST7796S=1 MR_ILI9341_MADCTL=0xE8 MR_LCD_SPI_BAUD={lcd_hz}u BB_LCD_PERI_HZ={peri_num}u{(" BB_LCD_PERI_SYSDIV="+str(peri_div)) if peri_div else ""} BB_LCD_LACE={lcd_lace}
     BB622_SD_SPI_HZ={sd_hz}u BB622_SD_MULTI={sd_multi}u
-    B86_V90_INTERP_HIST={fast_sw["BB_MEASURE_V90"]} B86_PJ_V91_PM16={fast_sw["BB_MEASURE_V91"]} BB_PJ_PM16_ADAPTIVE={fast_sw["BB_PM16_ADAPTIVE"]} B86_PJ_V93_PM16_LINK={fast_sw["BB_PM16_LINK"]} BB_DPMI={fast_sw["BB_DPMI"]}{(" BB_PSRAM_MAX_HZ="+psram_hz+"u") if psram_hz else ""})
+    B86_V90_INTERP_HIST={fast_sw["BB_MEASURE_V90"]} B86_PJ_V91_PM16={fast_sw["BB_MEASURE_V91"]} BB_PJ_PM16_ADAPTIVE={fast_sw["BB_PM16_ADAPTIVE"]} B86_PJ_V93_PM16_LINK={fast_sw["BB_PM16_LINK"]} BB_DPMI={fast_sw["BB_DPMI"]} BB_DPMI_DIRECT={fast_sw["BB_DPMI_DIRECT"]}{(" BB_PSRAM_MAX_HZ="+psram_hz+"u") if psram_hz else ""})
 target_sources(blitzbus_pico_b86_dos PRIVATE
     "{(root/'src/bb_lcd_console.c').as_posix()}"
     "${{MD_ROOT}}/blitzbus-overlay/mr_pico_ili9341.c"

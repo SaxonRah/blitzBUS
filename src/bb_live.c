@@ -1720,14 +1720,34 @@ static unsigned bb_v61_events;
 #endif
 #if BB_DPMI
 #define DPMI_LOG(...) printf(__VA_ARGS__)
+/* BB_DIAG_V52: what core 0 is doing, kept in watchdog scratch[2] for the crash record */
+#if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+#define DPMI_PHASE(p) (watchdog_hw->scratch[2] = (uint32_t)(p))
+#define DPMI_PHASE_NOW() (watchdog_hw->scratch[2])
+#else
+#define DPMI_PHASE(p) ((void)0)
+#define DPMI_PHASE_NOW() 0u
+#endif
 #include "../src/dpmi_host.c"
 #ifndef BB_DPMI_PGOFF
 #define BB_DPMI_PGOFF 0          /* 1: paging off around host real-mode calls (fallback) */
 #endif
+#ifndef BB_DPMI_DIRECT
+#define BB_DPMI_DIRECT 1         /* 1: IRQs straight to the application's handlers in flat segments; 2: to all its 32-bit handlers; 0: always via the client */
+#endif
+static unsigned DPMI_COLD bb_dpmi_pic_isr(void) { return bb_irq36.isr; }   /* for direct delivery: real IRQs only */
 /* swap store: BLITZBUS/DPMISWAP.BIN on the SD card (bb_dos622_hdd_sd_v1.inc) */
 extern bool bb_sd_dpmi_swap(uint32_t slot, uint8_t *page, int write);
-static int DPMI_COLD bb_dpmi_swap_rd(uint32_t slot, uint8_t *p) { return bb_sd_dpmi_swap(slot, p, 0) ? 1 : 0; }
-static int DPMI_COLD bb_dpmi_swap_wr(uint32_t slot, const uint8_t *p) { return bb_sd_dpmi_swap(slot, (uint8_t *)p, 1) ? 1 : 0; }
+static int DPMI_COLD bb_dpmi_swap_rd(uint32_t slot, uint8_t *p)
+{
+    uint32_t was = DPMI_PHASE_NOW(); DPMI_PHASE(0x05000000u | slot);
+    int ok = bb_sd_dpmi_swap(slot, p, 0) ? 1 : 0; DPMI_PHASE(was); return ok;
+}
+static int DPMI_COLD bb_dpmi_swap_wr(uint32_t slot, const uint8_t *p)
+{
+    uint32_t was = DPMI_PHASE_NOW(); DPMI_PHASE(0x04000000u | slot);
+    int ok = bb_sd_dpmi_swap(slot, (uint8_t *)p, 1) ? 1 : 0; DPMI_PHASE(was); return ok;
+}
 static int DPMI_COLD bb_dpmi_rm(B86Cpu *c, uint8_t v)
 {
     if (!dpmi_ready()) {
@@ -1737,9 +1757,11 @@ static int DPMI_COLD bb_dpmi_rm(B86Cpu *c, uint8_t v)
         env.stub_seg = 0x0040u; env.stub_off = 0x00F0u;           /* BDA inter-application area, 16 bytes */
         env.ext_base = 0x110000u; env.ext_end = (uint32_t)B86_RAM_BYTES;
         env.swap_read = bb_dpmi_swap_rd; env.swap_write = bb_dpmi_swap_wr; env.pg_off_in_rm = BB_DPMI_PGOFF;
+        env.irq_direct_off = !BB_DPMI_DIRECT; env.pic_isr = bb_dpmi_pic_isr; env.irq_direct_flat_only = (BB_DPMI_DIRECT == 1);
+        env.bios_irq0_hint = 0xF0000100u;   /* bb622_bios_irqchain_seed: F000:0100 (the host checks the bytes) */
         dpmi_init(&env);
         if (!dpmi_ready()) return 0;                                  /* no PSRAM for the state: stay off */
-        printf("[bb-dpmi] host on: frames %08lX-%08lX, 16 MB virtual, swap on SD, stubs 0040:00F0%s\n", (unsigned long)env.ext_base, (unsigned long)env.ext_end, BB_DPMI_PGOFF ? ", paging off in real mode" : "");
+        printf("[bb-dpmi] host on: frames %08lX-%08lX, 16 MB virtual, swap on SD, stubs 0040:00F0%s, direct IRQ delivery %s\n", (unsigned long)env.ext_base, (unsigned long)env.ext_end, BB_DPMI_PGOFF ? ", paging off in real mode" : "", BB_DPMI_DIRECT == 2 ? "on (all handlers)" : BB_DPMI_DIRECT ? "on (flat handlers)" : "off");
     }
     return dpmi_rm_int(c, v);
 }
@@ -2505,9 +2527,16 @@ void bb_fault_c(uint32_t *sf, uint32_t exc_lr)
     watchdog_hw->scratch[0] = 0xB86F0000u | BB_FAULT_V51 | (core << 15) | ((bb_phase & 7u) << 12) |
                               (((hfsr >> 31) & 1u) << 11) | (((hfsr >> 30) & 1u) << 10) |
                               (((hfsr >> 1) & 1u) << 9) | ((uint32_t)in_stack << 8) | (exc_lr & 0x7Fu);
-    watchdog_hw->scratch[1] = in_stack ? sf[6] : 0xFFFFFFFFu;
-    watchdog_hw->scratch[2] = fa;
-    watchdog_hw->scratch[3] = *(volatile uint32_t *)0xE000ED28u;     /* CFSR */
+    if (in_stack) {
+        watchdog_hw->scratch[1] = sf[6];
+        watchdog_hw->scratch[2] = fa;
+        watchdog_hw->scratch[3] = *(volatile uint32_t *)0xE000ED28u;     /* CFSR */
+    } else {
+        /* BB_DIAG_V52: no frame to read. Keep scratch[2] (core-0 phase marker) and
+         * scratch[3] (guest CS:IP of the last slice); the CFSR goes to scratch[1]. */
+        watchdog_hw->scratch[0] |= 0x80u;
+        watchdog_hw->scratch[1] = *(volatile uint32_t *)0xE000ED28u;
+    }
     if (bb_phase == BB_PHASE_REBOOT) for (;;) {}  /* the bootrom's BOOTSEL reboot is already armed */
     watchdog_reboot(0, 0, 10);
     for (;;) {}
@@ -2562,6 +2591,15 @@ static void bb_diag_boot_report(void)
         printf("[bb-v51-fault] PREVIOUS RUN HARDFAULT core=%lu phase=%s hfsr:debugevt=%lu forced=%lu vecttbl=%lu cfsr=%08lX exc-return=..%02lX\n",
                (unsigned long)core, phases[ph], (unsigned long)((m >> 11) & 1u), (unsigned long)((m >> 10) & 1u),
                (unsigned long)((m >> 9) & 1u), (unsigned long)cfsr, (unsigned long)exc);
+        if (m & 0x80u) {                                   /* BB_DIAG_V52 record */
+            static const char *const what[8] = { "?", "native/JIT run", "DPMI host trap", "page-fault resolve",
+                                                 "swap WRITE", "swap READ", "DPMI INT 31h", "real-mode service" };
+            uint32_t phw = fa, k = (phw >> 24) & 7u;
+            printf("[bb-v52-fault] no exception frame (SP outside the stack); cfsr=%08lX\n", (unsigned long)pc);
+            printf("[bb-v52-fault] core 0 was in: %s (detail %06lX); guest at %04lX:%s%04lX\n", what[k], (unsigned long)(phw & 0xFFFFFFu),
+                   (unsigned long)(cfsr >> 16), k == 1u ? "" : "....", (unsigned long)(cfsr & 0xFFFFu));
+            if (k == 1u) printf("[bb-v52-fault] guest EIP = %04lX%04lX\n", (unsigned long)(phw & 0xFFFFu), (unsigned long)(cfsr & 0xFFFFu));
+        } else
         printf("[bb-v51-fault] frame=%08lX stack=%08lX..%08lX (%s) stacked-pc=%08lX%s code=%p..%p\n",
                (unsigned long)fa, (unsigned long)lo, (unsigned long)hi,
                (m & 0x100u) ? "frame inside the stack" : "FRAME OUTSIDE THE STACK: overflow or corrupt SP",
@@ -2574,9 +2612,9 @@ static void bb_diag_boot_report(void)
                (unsigned long)watchdog_hw->scratch[3]);
     }
     else if (m == BB_DIAG_ARMED && watchdog_enable_caused_reboot())
-        printf("[bb-v42-diag] PREVIOUS RUN HUNG (3 s watchdog) last native slice at guest %04lX:%04lX, slice %lu\n",
+        printf("[bb-v42-diag] PREVIOUS RUN HUNG (3 s watchdog) last native slice at guest %04lX:%04lX, slice %lu; core-0 phase %08lX\n",
                (unsigned long)(watchdog_hw->scratch[3] >> 16), (unsigned long)(watchdog_hw->scratch[3] & 0xFFFFu),
-               (unsigned long)watchdog_hw->scratch[1]);
+               (unsigned long)watchdog_hw->scratch[1], (unsigned long)watchdog_hw->scratch[2]);
     watchdog_hw->scratch[0] = 0;
     fflush(stdout);
     bb_v51_paint_stack();
@@ -2604,6 +2642,7 @@ static void bb_diag_slice(void)
     }
     if (bb_wd_on) {
         watchdog_hw->scratch[3] = (C.seg[B86_CS] << 16) | (C.ip & 0xFFFFu);
+        watchdog_hw->scratch[2] = 0x01000000u | (C.ip >> 16);   /* BB_DIAG_V52: native run; EIP bits 31:16 */
         watchdog_hw->scratch[1]++;
         watchdog_update();
     }
@@ -3211,6 +3250,7 @@ static int DPMI_COLD bb_dpmi_service(B86Cpu *c, int rc, unsigned budget)
     for (unsigned k = 0; k < 64u && rc == B86_TRAP && (c->msw & 1u) && (uint16_t)c->seg[B86_CS] == dpmi_host_cs(); ++k) {
         dpmi_pm_trap(c);
         bb386_pmirq_poll();
+        DPMI_PHASE(0x01000000u);
         rc = b86_jit_run(c, budget);
     }
     return rc;

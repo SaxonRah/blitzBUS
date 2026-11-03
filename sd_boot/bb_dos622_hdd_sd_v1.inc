@@ -63,11 +63,22 @@ static bool bb622_hd_map_build(void)
     bb622_hd_next = n;
     return true;
 }
+/* BB_SD_WRCLK_V1: writes at a lower SPI clock than reads. Long multi-block
+ * writes at 12 MHz occasionally corrupted the card protocol on this wiring
+ * (swap file, BB_DPMI); at 6.25 MHz 1,348 swap writes ran without an error.
+ * Reads keep BB622_SD_SPI_HZ. */
+#ifndef BB622_SD_SPI_WR_HZ
+#define BB622_SD_SPI_WR_HZ 6250000u
+#endif
+static void bb622_retime_spi1_write(void)
+{
+    (void)spi_set_baudrate(spi1, BB622_SD_SPI_WR_HZ);
+}
 /* write=0: read, 1: write; `count` image sectors from image sector s */
 static bool bb622_hd_direct_rw(int write, uint32_t s, uint8_t *buf, uint32_t count)
 {
     unsigned e = 0u;
-    bb622_retime_spi1();
+    if (write) bb622_retime_spi1_write(); else bb622_retime_spi1();   /* BB_SD_WRCLK_V1 */
     while (count) {
         uint32_t n;
         LBA_t lba;
@@ -311,7 +322,7 @@ bool bb_sd_dpmi_swap(uint32_t slot, uint8_t *page, int write)
         FRESULT fr;
         if (!bb_dpmi_swap_ready()) return false;
         w = bb_dpmi_swap;
-        bb622_retime_spi1();
+        if (write) bb622_retime_spi1_write(); else bb622_retime_spi1();   /* BB_SD_WRCLK_V1 */
         fr = f_lseek(&w->fil, (FSIZE_t)slot * 4096u);
         if (fr == FR_OK) fr = write ? f_write(&w->fil, page, 4096u, &n) : f_read(&w->fil, page, 4096u, &n);
         if (fr == FR_OK && write && ++w->unsynced >= 32u) { w->unsynced = 0; fr = f_sync(&w->fil); }
