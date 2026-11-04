@@ -8,8 +8,18 @@
 #include "b86.h"
 #if defined(PICO_RP2350) && defined(__arm__) && !defined(__riscv)
 #define BB49_COUNT 1024u
+#ifndef BB_PJ_PCS_FEED
+#define BB_PJ_PCS_FEED 1      /* V120: every sample also goes to the JIT (sample-driven SRAM promotion) */
+#endif
+#ifndef BB49_PROFILE_HZ
+#define BB49_PROFILE_HZ 32u   /* profiler V2: 1024 samples = 32 s; the gpc/region profile keeps this rate */
+#endif
 #ifndef BB49_SAMPLE_HZ
-#define BB49_SAMPLE_HZ 32u    /* profiler V2: 1024 samples = 32 s; cumulative counts outlive ring */
+#if BB_PJ_PCS_FEED
+#define BB49_SAMPLE_HZ 1024u  /* V120: SysTick rate; the profile ring takes every (SAMPLE_HZ/PROFILE_HZ)-th */
+#else
+#define BB49_SAMPLE_HZ BB49_PROFILE_HZ
+#endif
 #endif
 static volatile uint32_t bb49_pc[BB49_COUNT];
 static volatile uint32_t bb49_seq;
@@ -66,6 +76,14 @@ __attribute__((noinline,used)) static void bb49_capture_frame(
     } else {
         bb49_rejected++; return;
     }
+#if BB_PJ_PCS_FEED
+    {   extern void b86_pj_pc_sample(uint32_t pc);
+        static uint32_t bb49_div;
+        b86_pj_pc_sample(pc);                                 /* V120: interrupt-safe ring push */
+        if (++bb49_div < BB49_SAMPLE_HZ / BB49_PROFILE_HZ) return;   /* profile at the old rate */
+        bb49_div = 0u;
+    }
+#endif
     if (pc>=0x20000000u && pc<0x20082000u) ++bb49_total_sram;
     else if (pc>=0x10000000u && pc<0x11000000u) ++bb49_total_flash;
     else if (pc>=0x11000000u && pc<0x11800000u) ++bb49_total_psram;

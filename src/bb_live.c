@@ -940,6 +940,15 @@ static uint8_t bb_v23_scan(unsigned c) {
     if(c==27)return 0x01;
     if(c==8||c==127)return 0x0e;
     if(c==' ')return 0x39;
+    if(c==9)return 0x0f;
+    {   /* BB_KEYSCAN_V1: punctuation and shifted digits (US layout; the key's own scancode,
+         * e.g. '+' -> the '=' key, '_' -> the '-' key). Games with their own INT 9 handler
+         * (Descent: '-'/'=' resize the window) read only scancodes. */
+        static const char pk[]="-_=+[{]};:'\"`~\\|,<.>/?!@#$%^&*()";
+        static const uint8_t ps[]={0x0c,0x0c,0x0d,0x0d,0x1a,0x1a,0x1b,0x1b,0x27,0x27,0x28,0x28,0x29,0x29,0x2b,0x2b,
+                                   0x33,0x33,0x34,0x34,0x35,0x35,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b};
+        for(unsigned i=0;i<sizeof ps;i++) if(c==(unsigned char)pk[i])return ps[i];
+    }
     return 0u;
 }
 static void bb386_kbd_push(uint8_t scan);   /* BB386_PMKBD_V1 */
@@ -1736,6 +1745,12 @@ static unsigned bb_v61_events;
 #define BB_DPMI_DIRECT 1         /* 1: IRQs straight to the application's handlers in flat segments; 2: to all its 32-bit handlers; 0: always via the client */
 #endif
 static unsigned DPMI_COLD bb_dpmi_pic_isr(void) { return bb_irq36.isr; }   /* for direct delivery: real IRQs only */
+#ifndef BB_DPMI_TIMEFAST
+#define BB_DPMI_TIMEFAST 1       /* 1: INT 21h AH=2Ch from 32-bit code answered by the host (DOS/4G's arithmetic) */
+#endif
+#ifndef BB_DPMI_INTSTAT
+#define BB_DPMI_INTSTAT 1        /* 1: count software INTs 10h-33h and INT 21h by AH (diagnostic; this build: on) */
+#endif
 /* swap store: BLITZBUS/DPMISWAP.BIN on the SD card (bb_dos622_hdd_sd_v1.inc) */
 extern bool bb_sd_dpmi_swap(uint32_t slot, uint8_t *page, int write);
 static int DPMI_COLD bb_dpmi_swap_rd(uint32_t slot, uint8_t *p)
@@ -1759,6 +1774,7 @@ static int DPMI_COLD bb_dpmi_rm(B86Cpu *c, uint8_t v)
         env.swap_read = bb_dpmi_swap_rd; env.swap_write = bb_dpmi_swap_wr; env.pg_off_in_rm = BB_DPMI_PGOFF;
         env.irq_direct_off = !BB_DPMI_DIRECT; env.pic_isr = bb_dpmi_pic_isr; env.irq_direct_flat_only = (BB_DPMI_DIRECT == 1);
         env.bios_irq0_hint = 0xF0000100u;   /* bb622_bios_irqchain_seed: F000:0100 (the host checks the bytes) */
+        env.dos_time_fast = BB_DPMI_TIMEFAST; env.int_stats = BB_DPMI_INTSTAT;
         dpmi_init(&env);
         if (!dpmi_ready()) return 0;                                  /* no PSRAM for the state: stay off */
         printf("[bb-dpmi] host on: frames %08lX-%08lX, 16 MB virtual, swap on SD, stubs 0040:00F0%s, direct IRQ delivery %s\n", (unsigned long)env.ext_base, (unsigned long)env.ext_end, BB_DPMI_PGOFF ? ", paging off in real mode" : "", BB_DPMI_DIRECT == 2 ? "on (all handlers)" : BB_DPMI_DIRECT ? "on (flat handlers)" : "off");

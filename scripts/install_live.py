@@ -346,7 +346,7 @@ static bool md_pico_set_clock(void)
     fast_sw = {}
     for name, default in (("BB_MEASURE_V90", "0"), ("BB_MEASURE_V91", "0"), ("BB_PM16_ADAPTIVE", "1"), ("BB_PM16_LINK", "1"), ("BB_DPMI", "0"), ("BB_DPMI_DIRECT", "1")):
         fast_sw[name] = os.environ.get(name, default)
-        if fast_sw[name] not in ("0", "1"):
+        if fast_sw[name] not in (("0", "1", "2") if name == "BB_DPMI_DIRECT" else ("0", "1")):   # BB_DPMI_DIRECT=2: all handlers
             raise SystemExit("%s must be 0 or 1 (got %r)" % (name, fast_sw[name]))
     # BB_SD_MULTI: sectors per SD command for INT 13h reads of A: and C:
     # (src/bb_dos622_bios.inc). 0 = the original one-sector loops.
