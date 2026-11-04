@@ -43,6 +43,25 @@ PC. The on-device compiler is the third path and the one that closes the loop.
 - **The handheld is the Pico Plus 2.** The Pi Zero 2 W is a fast development
   host and a hardening target for blitzBUS, not the shipping hardware.
 
+## Now: compatibility pass
+
+Descent under the blitzBUS DPMI host is stable (virtual memory with SD swap,
+direct IRQ delivery, sound and music) but CPU-bound at about 1 frame per
+second; see "Performance goals". Before more speed work, map what runs: the
+`dos_bench` pack (PhilsComputerLab, 18 programs) covers real mode, DOS/4GW,
+DJGPP/CWSDPMI, VGA and VESA. Procedure, matrix and predictions are in
+`COMPAT.md`.
+
+1. Run the matrix with `BB_DPMI=1`; re-run failures with `BB_DPMI=0` to tell
+   host problems from CPU problems.
+2. Record the cause of each failure (BIOS function, DPMI function,
+   instruction) in `COMPAT.md`.
+3. Fix by reach: what unblocks the most programs first. Likely candidates:
+   DJGPP on the DPMI host (Chris's 3D, Quake), CPU-detection answers, clean
+   failure instead of hangs for VESA requests.
+4. Add the DOS games on the SD image (Descent, Doom) and further titles per
+   extender family once the pack is green.
+
 ## Next: Pi Zero 2 W to AArch32
 
 The existing Pi bring-up lives in `microDOS/pi0w/`: `config.txt`
@@ -108,10 +127,24 @@ needs an allocator and an executable arena on the Pi).
   first, then set a per-program target.
 - **Pick a reference 486 system** and compare frame rates on 3DBENCH and Descent
   against it, instead of comparing MIPS.
+- **Descent, measured (2026-11-04).** About 1 fps in the demo with sound and
+  music at 360 MHz (98-110 s per 100 frames). Core 0 during the demo: 44%
+  native code (of which about 19 points are the JIT's shared stubs, mostly the
+  memory trampoline), about 8% block lookups, 6% interpreter, 5% translation
+  and SMC churn, the rest spread thinly. Window size barely matters: the cost
+  is per frame (geometry, game logic, DOS/4GW, HMI sound), not per pixel.
+  Sample-driven SRAM promotion (V120) doubled the SRAM tier's share to about
+  10%; the remaining PSRAM block time is a long tail. Realistic remaining
+  headroom with this design is about 1.3-1.5x (tier limits, lookups, inline
+  memory access); a playable frame rate for Descent is out of reach on this
+  hardware.
 - **Quake needs an x87 FPU.** blitz86 has an experimental x87 path (two
   commits, 2026-10-24), built only with `B86_X87_EXPERIMENTAL`. Neither blitzBUS
   nor microDOS sets that flag, so the known-good firmware runs the
   absent-coprocessor mode from r61 (FPU instructions decoded and ignored).
+  (To check: current DPMI-host logs show `[bb386-x87] c-executed=... D9:...
+  DD:...` for Descent, so some x87 execution in C is active in today's
+  build; confirm which path and update this paragraph.)
   What the experimental path has: exact 80-bit software arithmetic with
   round-to-nearest-even; register-form FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR and their
   popping forms; FLD/FST/FSTP/FXCH ST(i); the seven constants; FCHS, FABS,

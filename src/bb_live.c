@@ -2450,7 +2450,7 @@ static int start(MdRuntime *rt)
     /* BB_DOS622_IPL_V1: boot a real disk only when DOS622.TXT = 1. */
     if (bb_sd_dos622_active()) {
 #ifndef BB622_IRQ0_AB_DISABLE
-#define BB622_IRQ0_AB_DISABLE 1
+#define BB622_IRQ0_AB_DISABLE 0   /* BB_RM_IRQ0_V1: real-mode IRQ0 through the normal PIC path */
 #endif
         bb_v15_original_interrupt = bb622_bios_interrupt;
 #if BB622_IRQ0_AB_DISABLE
