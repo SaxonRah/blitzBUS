@@ -8,10 +8,16 @@ compatibility matrix.
 Profile at 240 KB real-mode cache: 36% translated code, about 22% interpreter,
 5% lazy flags, about 5% USB console input polling, about 4% interrupt handling.
 
-- [ ] Reduce USB console input polling during programs (`bb_v23_poll_input`,
-      `stdio_get_until`: about 5%)
-- [ ] Teach the harness to load programs above 64 KB like `LOADFIX`, so
-      3DBench runs there
+- [x] Reduce USB console input polling during programs (`blitzbus_poll_throttle_v1`:
+      38.4 → 40.0)
+- [x] Teach the harness to load programs above 64 KB like `LOADFIX`, so
+      3DBench runs there (`LOADFIX=1`)
+- [x] INT fast path in the real-mode JIT (`blitz86_int_fast_v1`); correct, but the
+      `INT 16h` flood was 3DBench's title screen, not the benchmark
+- [x] Ruled out: VGA retrace (70 Hz made no difference; rolled back), timer chain
+      into DOS (3DBench's handler doesn't chain; the "DOS time" was its load phase)
+- [ ] Note: the 70+ score was under microDOS (DOS 2 path, BIOS/DOS in C on the
+      host), today's 40 under real DOS 6.22: different environments, accepted
 - [ ] Count which instructions the real-mode JIT leaves to the interpreter
       (about 22% of the time)
 - [ ] Translate the most frequent of them natively, or move their interpreter
@@ -34,7 +40,7 @@ Real-mode programs need a large real-mode cache (3DBench: about 232 KB or
 more); DOS/4GW and DJGPP programs need the protected-mode hot tier. Both share
 the same SRAM, and today the split is fixed at build time.
 
-- [ ] Short term: two build profiles in `bb.config.psd1`
+- [x] Short term: two build profiles (`scripts\bb_profile.ps1 pm|rm`)
   - Real mode: `BB_PJ_HOT_KB 0`, `BB_PM_RAM 0`, `BB_CODE_KB 240`
   - Protected mode: `BB_PJ_HOT_KB 91`, `BB_CODE_KB 128`
 - [ ] Long term: a shared SRAM pool, assigned at runtime to whichever JIT is

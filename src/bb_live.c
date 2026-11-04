@@ -1257,6 +1257,12 @@ static void bb_v23_poll_input(void) {
 #endif
     ++bb_v23_polls;
 #if defined(PICO_ON_DEVICE) && PICO_ON_DEVICE
+    {   /* BB_POLL_THROTTLE_V1: the USB console at most every 2 ms (was every guest slice: ~5% of core 0) */
+        static uint32_t bb_poll_last_us;
+        const uint32_t bb_poll_now = time_us_32();
+        if ((uint32_t)(bb_poll_now - bb_poll_last_us) < 2000u) { --bb_v23_polls; return; }
+        bb_poll_last_us = bb_poll_now;
+    }
     /* Avoid draining multiple characters during a single guest slice. */
     int c=getchar_timeout_us(0);
     /* BB_DOS622_SWAP_LCD_V2: protected out-of-band 3-byte disk command.
