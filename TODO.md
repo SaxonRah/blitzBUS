@@ -31,8 +31,10 @@ Profile at 240 KB real-mode cache: 36% translated code, about 22% interpreter,
 real-mode program with its own INT 8 handler from getting ticks. Patched by
 `blitzbus_rm_irq0_v1` (3DBench: 00.0 → 35.7).
 
-- [ ] Watch `bb_rm_irq0` for stability (boot, DOS, Descent)
-- [ ] If stable: make `BB622_IRQ0_AB_DISABLE 0` the default in the repository
+- [x] Watch `bb_rm_irq0` for stability: DOS, 3DBench, Descent (987 M instructions,
+      120 Hz timer delivered, no faults; Descent 101.7 s/100 frames, within noise)
+- [ ] Commit the local `bb_live.c` (`BB622_IRQ0_AB_DISABLE 0`, polling throttle) to the
+      repository, so it's the default
 
 ## 3. SRAM split between real and protected mode
 
@@ -45,7 +47,8 @@ the same SRAM, and today the split is fixed at build time.
   - Protected mode: `BB_PJ_HOT_KB 91`, `BB_CODE_KB 128`
 - [ ] Long term: a shared SRAM pool, assigned at runtime to whichever JIT is
       active
-  - [ ] Design: one memory area, two code caches, eviction on handover
+  - [x] Design: one memory area, two code caches, eviction on handover
+        (`DESIGN_SRAM_POOL.md`)
   - [ ] Real-mode JIT: cache in the pool
   - [ ] Protected-mode JIT: hot tier in the pool
   - [ ] Handover on mode switch (DPMI host, DOS calls)
